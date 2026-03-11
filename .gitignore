@@ -1,0 +1,7 @@
+node_modules/
+dist/
+.env
+browser-state.json
+api-collection.json
+diff-report.json
+diff-report.html
