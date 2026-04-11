@@ -1,0 +1,442 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8"/>
+  <meta name="viewport" content="width=device-width,initial-scale=1"/>
+  <title>API Migration Check — QA Guide</title>
+  <style>
+    * { box-sizing:border-box }
+    body { font-family:-apple-system,BlinkMacSystemFont,'Segoe UI',Roboto,sans-serif;
+           margin:0;background:#f4f6f9;color:#222;padding:0 }
+    .hero { background:linear-gradient(135deg,#1a237e,#1565c0);color:#fff;
+            padding:48px 40px 40px;text-align:center }
+    .hero h1 { font-size:32px;margin:0 0 10px }
+    .hero p  { font-size:16px;opacity:.85;margin:0;max-width:580px;margin:0 auto }
+    .wrap  { max-width:860px;margin:0 auto;padding:36px 24px }
+    .card  { background:#fff;border-radius:12px;box-shadow:0 1px 6px rgba(0,0,0,.1);
+             padding:28px 32px;margin-bottom:24px }
+    .card h2 { font-size:19px;margin:0 0 16px;color:#1a237e;display:flex;align-items:center;gap:10px }
+    .card p, .card li { font-size:14px;line-height:1.8;color:#444 }
+    ul, ol { padding-left:22px;margin:10px 0 }
+    li { margin-bottom:6px }
+    .step { display:flex;gap:16px;margin-bottom:18px;align-items:flex-start }
+    .step-num { background:#1565c0;color:#fff;border-radius:50%;width:34px;height:34px;
+                display:flex;align-items:center;justify-content:center;
+                font-weight:700;font-size:15px;flex-shrink:0;margin-top:2px }
+    .step-body h3 { margin:0 0 4px;font-size:15px;color:#222 }
+    .step-body p  { margin:0;font-size:13px;color:#555;line-height:1.7 }
+    .cmd  { background:#1e2a3a;color:#a8d8a8;padding:12px 18px;border-radius:8px;
+            font-family:monospace;font-size:13px;margin:10px 0;
+            white-space:pre-wrap;word-break:break-all }
+    .tip  { background:#e8f5e9;border-left:4px solid #4caf50;padding:12px 16px;
+            border-radius:4px;font-size:13px;color:#2e7d32;margin:12px 0 }
+    .warn { background:#fff8e1;border-left:4px solid #ffc107;padding:12px 16px;
+            border-radius:4px;font-size:13px;color:#795548;margin:12px 0 }
+    .info { background:#e3f2fd;border-left:4px solid #1565c0;padding:12px 16px;
+            border-radius:4px;font-size:13px;color:#1a237e;margin:12px 0 }
+    .compare-grid { display:grid;grid-template-columns:1fr 1fr;gap:16px;margin:16px 0 }
+    .compare-box  { border-radius:8px;padding:16px 18px;font-size:13px;line-height:1.8 }
+    .compare-old  { background:#ffebee;border:1px solid #ef9a9a }
+    .compare-new  { background:#e8f5e9;border:1px solid #a5d6a7 }
+    .compare-box h4 { margin:0 0 8px;font-size:14px }
+    .badge { display:inline-block;padding:3px 10px;border-radius:12px;font-size:12px;font-weight:600 }
+    .badge-pass { background:#e8f5e9;color:#2e7d32 }
+    .badge-fail { background:#ffebee;color:#c62828 }
+    table.env { border-collapse:collapse;width:100%;font-size:13px;margin-top:12px }
+    table.env th { background:#e8eaf6;padding:8px 12px;text-align:left;font-weight:600;color:#3949ab }
+    table.env td { padding:8px 12px;border-bottom:1px solid #eee;color:#444 }
+    table.env td:first-child { font-family:monospace;color:#c62828;font-weight:600 }
+    .report-preview { border:1px solid #ddd;border-radius:8px;overflow:hidden;margin-top:12px }
+    .report-preview .rp-head { background:#f5f5f5;padding:8px 14px;font-size:12px;color:#888;
+                                border-bottom:1px solid #ddd }
+    .api-row { padding:14px 18px;border-bottom:1px solid #eee;display:flex;
+               justify-content:space-between;align-items:center;font-size:13px }
+    .api-row:last-child { border-bottom:none }
+    .api-name { font-weight:600;color:#1a237e }
+    .api-meta { font-size:12px;color:#888;margin-top:2px }
+    .faq-item  { border-bottom:1px solid #eee;padding:14px 0 }
+    .faq-item:last-child { border-bottom:none }
+    .faq-q { font-weight:600;color:#1a237e;font-size:14px;margin-bottom:6px }
+    .faq-a { font-size:13px;color:#555;line-height:1.7 }
+    @media(max-width:600px){
+      .compare-grid { grid-template-columns:1fr }
+      .hero { padding:32px 20px }
+    }
+  </style>
+</head>
+<body>
+
+<div class="hero">
+  <h1>&#128203; API Migration Check Tool</h1>
+  <p>A simple guide for QA testers to verify that our backend migration hasn't broken anything — no technical knowledge needed.</p>
+</div>
+
+<div class="wrap">
+
+  <!-- WHAT IS THIS -->
+  <div class="card">
+    <h2>&#129300; What is this tool?</h2>
+    <p>When our team moves the backend to a new server, we need to make sure every API still works correctly and returns the same data. This tool does that check automatically.</p>
+
+    <div class="compare-grid">
+      <div class="compare-box compare-old">
+        <h4>&#128552; What you used to do</h4>
+        <ul style="margin:0;padding-left:18px">
+          <li>Open browser → login</li>
+          <li>Open Network tab → find API</li>
+          <li>Copy as cURL → paste in Postman</li>
+          <li>Run on old server, note the result</li>
+          <li>Change URL to new server, run again</li>
+          <li>Manually compare both results</li>
+          <li><strong>Repeat 10+ times — takes hours</strong></li>
+        </ul>
+      </div>
+      <div class="compare-box compare-new">
+        <h4>&#127881; What this tool does</h4>
+        <ul style="margin:0;padding-left:18px">
+          <li>You login once in the browser</li>
+          <li>You click around the page normally</li>
+          <li>Tool captures all the APIs automatically</li>
+          <li>Calls both old and new server instantly</li>
+          <li>Compares results automatically</li>
+          <li>Generates a clear report</li>
+          <li><strong>10 APIs checked in ~5 minutes</strong></li>
+        </ul>
+      </div>
+    </div>
+  </div>
+
+  <!-- ONE-TIME SETUP -->
+  <div class="card">
+    <h2>&#9881;&#65039; One-time setup (ask your developer)</h2>
+    <p>Before you use the tool for the first time, a developer needs to set it up on your computer. This only needs to happen once.</p>
+
+    <p><strong>What the developer will do:</strong></p>
+    <ol>
+      <li>Install Node.js on your computer</li>
+      <li>Open the project folder: <code>api-capture-compare</code></li>
+      <li>Run <code>npm install</code> in a terminal</li>
+      <li>Fill in the <code>.env</code> file with the correct URLs and API names</li>
+    </ol>
+
+    <div class="tip">&#10003; Once setup is done, you never need to touch any code or settings. Just run the commands below.</div>
+
+    <p><strong>The <code>.env</code> file — what the developer fills in:</strong></p>
+
+    <div class="info" style="margin-bottom:14px">
+      &#128161; <strong>Important:</strong> The website you log into and the APIs it uses are often on <em>different addresses</em>.
+      For example, you might log in at <code>app.company.com</code> but the data APIs run on <code>api.company.com</code>.
+      The tool handles this automatically — you only need to tell it where to log in and where the new API server is.
+    </div>
+
+    <table class="env">
+      <tr><th>Setting</th><th>What it means</th><th>Example</th></tr>
+      <tr>
+        <td>UI_URL</td>
+        <td><strong>The website address you log into.</strong> Used only for login and page navigation — not the API server.</td>
+        <td>https://app.yourcompany.com</td>
+      </tr>
+      <tr>
+        <td>LOGIN_PATH</td>
+        <td>The path to the login page (added to UI_URL)</td>
+        <td>/login</td>
+      </tr>
+      <tr>
+        <td>TARGET_PATH</td>
+        <td>The page to open after login. Leave blank if the URL changes every session — your QA tester will paste it at runtime.</td>
+        <td>/dashboard</td>
+      </tr>
+      <tr>
+        <td>NEW_API_BASE</td>
+        <td><strong>The new API server address to test against.</strong> The tool takes every API call the page makes and replays it here. Only the server address changes — same request, same data, same token.</td>
+        <td>https://new-api.yourcompany.com</td>
+      </tr>
+      <tr>
+        <td>AUDIT_APIS</td>
+        <td>Which APIs to check — comma-separated path fragments. Only calls whose URL contains one of these will be captured.</td>
+        <td>/api/patients,/api/offices</td>
+      </tr>
+    </table>
+
+    <div style="background:#f9fbe7;border:1px solid #c5e1a5;border-radius:8px;padding:14px 18px;margin-top:16px;font-size:13px">
+      <strong style="color:#558b2f">How it works behind the scenes:</strong><br><br>
+      <div style="display:flex;align-items:center;gap:8px;flex-wrap:wrap;line-height:2">
+        <span style="background:#e3f2fd;padding:3px 10px;border-radius:6px">You open: <strong>app.company.com</strong></span>
+        <span style="color:#999">→ login →</span>
+        <span style="background:#fff3e0;padding:3px 10px;border-radius:6px">Page calls: <strong>old-api.company.com/api/patients</strong></span>
+        <span style="color:#999">→ tool captures it →</span>
+        <span style="background:#e8f5e9;padding:3px 10px;border-radius:6px">Tool replays: <strong>new-api.company.com/api/patients</strong></span>
+        <span style="color:#999">→ compares results</span>
+      </div>
+    </div>
+  </div>
+
+  <!-- HOW TO RUN -->
+  <div class="card">
+    <h2>&#9654;&#65039; How to run the check — step by step</h2>
+
+    <div class="step">
+      <div class="step-num">1</div>
+      <div class="step-body">
+        <h3>Open a terminal in the project folder</h3>
+        <p>On Mac: right-click the <code>api-capture-compare</code> folder → <em>New Terminal at Folder</em><br>
+           On Windows: open the folder → click the address bar → type <code>cmd</code> → press Enter</p>
+      </div>
+    </div>
+
+    <div class="step">
+      <div class="step-num">2</div>
+      <div class="step-body">
+        <h3>Type this command and press Enter</h3>
+        <p>If your page URL has a dynamic key that changes every session, copy the full URL from your browser and paste it like this:</p>
+        <div class="cmd">npm run audit -- --url "https://app.yourcompany.com/dashboard?APP_KEY=paste-your-key-here"</div>
+        <p>If the URL is always the same, just run:</p>
+        <div class="cmd">npm run audit</div>
+        <div class="tip">&#128161; Where to find your URL: after logging in, look at your browser's address bar and copy the full address including everything after the <code>?</code></div>
+      </div>
+    </div>
+
+    <div class="step">
+      <div class="step-num">3</div>
+      <div class="step-body">
+        <h3>A browser window will open automatically</h3>
+        <p><strong>First time only:</strong> the login page opens. Log in with your normal credentials.<br>
+           Come back to the terminal and press <strong>Enter</strong>.<br>
+           Next time, the tool will remember your session automatically.</p>
+        <div class="tip">&#128274; Your login is saved only on your computer. It is never shared or uploaded anywhere.</div>
+      </div>
+    </div>
+
+    <div class="step">
+      <div class="step-num">4</div>
+      <div class="step-body">
+        <h3>Use the page normally</h3>
+        <p>The browser will navigate to the correct page. Just interact with it as you normally would — apply filters, click buttons, open sections. The tool is silently watching in the background and will pick up the API calls automatically.</p>
+        <div class="info">&#128270; You will see API calls being printed in the terminal as they happen. This is normal.</div>
+      </div>
+    </div>
+
+    <div class="step">
+      <div class="step-num">5</div>
+      <div class="step-body">
+        <h3>Press Enter in the terminal when done</h3>
+        <p>Once you've triggered all the actions you want to test (e.g. applied a filter, opened a report), go back to the terminal and press <strong>Enter</strong>.</p>
+        <p>The tool will automatically call the new server with the same requests and compare the results.</p>
+      </div>
+    </div>
+
+    <div class="step">
+      <div class="step-num">6</div>
+      <div class="step-body">
+        <h3>Open the report</h3>
+        <p>A file called <code>audit-report.html</code> will appear in the project folder. Double-click it to open in your browser.</p>
+        <div class="tip">&#128203; Share this file directly with your team — just attach it to an email or upload to your test management tool.</div>
+      </div>
+    </div>
+  </div>
+
+  <!-- READING THE REPORT -->
+  <div class="card">
+    <h2>&#128202; How to read the report</h2>
+    <p>The report is designed to be understood at a glance. Here is what everything means:</p>
+
+    <p><strong>At the top — the overall verdict:</strong></p>
+    <div class="tip" style="font-size:14px">&#10003; <strong>All APIs are working correctly on the new system</strong><br>
+      Every checked API returned the same data. The migration looks good.</div>
+    <p>or</p>
+    <div class="warn" style="font-size:14px">&#9888; <strong>3 APIs need attention</strong><br>
+      7 out of 10 APIs passed. Please review the failed items before sign-off.</div>
+
+    <p style="margin-top:20px"><strong>The score cards:</strong></p>
+    <div style="display:flex;gap:12px;flex-wrap:wrap;margin-bottom:20px">
+      <div style="background:#e8f5e9;border-radius:8px;padding:12px 20px;text-align:center;min-width:100px">
+        <div style="font-size:28px;font-weight:800;color:#2e7d32">7</div>
+        <div style="font-size:12px;color:#555">APIs Working ✓</div>
+      </div>
+      <div style="background:#ffebee;border-radius:8px;padding:12px 20px;text-align:center;min-width:100px">
+        <div style="font-size:28px;font-weight:800;color:#c62828">3</div>
+        <div style="font-size:12px;color:#555">Need Attention ⚠</div>
+      </div>
+      <div style="background:#e3f2fd;border-radius:8px;padding:12px 20px;text-align:center;min-width:100px">
+        <div style="font-size:28px;font-weight:800;color:#1565c0">10</div>
+        <div style="font-size:12px;color:#555">Total Checked</div>
+      </div>
+      <div style="background:#f3e5f5;border-radius:8px;padding:12px 20px;text-align:center;min-width:100px">
+        <div style="font-size:28px;font-weight:800;color:#6a1b9a">70%</div>
+        <div style="font-size:12px;color:#555">Pass Rate</div>
+      </div>
+    </div>
+
+    <p><strong>Each API card looks like this:</strong></p>
+    <div class="report-preview">
+      <div class="rp-head">audit-report.html — preview</div>
+      <div style="padding:14px 18px;border-bottom:1px solid #eee;border-left:5px solid #4caf50">
+        <div style="display:flex;justify-content:space-between;align-items:center">
+          <div>
+            <div style="font-weight:700;font-size:15px">Paycheck Details</div>
+            <div style="font-size:12px;color:#888">GET · API #1</div>
+          </div>
+          <span class="badge badge-pass">✓ PASS</span>
+        </div>
+        <div style="display:flex;gap:24px;margin-top:10px">
+          <div><div style="font-size:11px;color:#888">Old System Records</div><div style="font-size:22px;font-weight:700;color:#1565c0">25</div></div>
+          <div style="align-self:center;font-size:20px;color:#ccc">→</div>
+          <div><div style="font-size:11px;color:#888">New System Records</div><div style="font-size:22px;font-weight:700;color:#2e7d32">25</div></div>
+          <div style="align-self:center;color:#2e7d32;font-size:15px;margin-left:4px">✓ Match</div>
+        </div>
+        <div style="margin-top:10px;padding:10px 14px;background:#f1f8e9;border-radius:6px;color:#558b2f;font-size:13px">
+          ✓ Everything looks correct — same records, same data structure, same response.
+        </div>
+      </div>
+      <div style="padding:14px 18px;border-left:5px solid #ef5350">
+        <div style="display:flex;justify-content:space-between;align-items:center">
+          <div>
+            <div style="font-weight:700;font-size:15px">Timesheet</div>
+            <div style="font-size:12px;color:#888">GET · API #2</div>
+          </div>
+          <span class="badge badge-fail">✗ FAIL</span>
+        </div>
+        <div style="display:flex;gap:24px;margin-top:10px">
+          <div><div style="font-size:11px;color:#888">Old System Records</div><div style="font-size:22px;font-weight:700;color:#1565c0">100</div></div>
+          <div style="align-self:center;font-size:20px;color:#ccc">→</div>
+          <div><div style="font-size:11px;color:#888">New System Records</div><div style="font-size:22px;font-weight:700;color:#c62828">87</div></div>
+          <div style="align-self:center;color:#c62828;font-size:13px;font-weight:600;margin-left:4px">▲ Count differs</div>
+        </div>
+        <div style="margin-top:10px;padding:12px 14px;background:#fff3e0;border-radius:6px;border-left:4px solid #ff9800">
+          <div style="font-weight:600;color:#e65100;margin-bottom:6px">What needs to be checked:</div>
+          <ul style="margin:0;padding-left:18px;color:#5d4037;font-size:13px;line-height:1.8">
+            <li>Record count changed: old system returned <b>100</b> records, new system returned <b>87</b></li>
+            <li>New system is missing data fields: <b>employeeName, department</b></li>
+          </ul>
+        </div>
+      </div>
+    </div>
+
+    <p style="margin-top:16px"><strong>What each check means in plain English:</strong></p>
+    <table class="env">
+      <tr><th>Check</th><th>What it means if it FAILS</th><th>What to do</th></tr>
+      <tr>
+        <td>HTTP Status</td>
+        <td>The new server could not process the request (e.g. returned an error)</td>
+        <td>Raise a bug — the API is broken on the new server</td>
+      </tr>
+      <tr>
+        <td>Record Count</td>
+        <td>The new server returned a different number of records than the old one</td>
+        <td>Raise a bug — data may be missing or duplicated</td>
+      </tr>
+      <tr>
+        <td>Response Keys</td>
+        <td>The new server's data is missing some fields, or has unexpected new fields</td>
+        <td>Raise a bug — the data structure has changed</td>
+      </tr>
+    </table>
+  </div>
+
+  <!-- WHAT TO DO WITH RESULTS -->
+  <div class="card">
+    <h2>&#128196; What to do with the results</h2>
+
+    <p><strong>If everything is PASS ✓</strong></p>
+    <div class="tip">
+      The new system is working correctly for all checked APIs. You can sign off on this migration.<br><br>
+      <strong>Attach <code>audit-report.html</code></strong> to your test evidence, Jira ticket, or email as proof.
+    </div>
+
+    <p style="margin-top:20px"><strong>If some APIs FAIL ✗</strong></p>
+    <ol>
+      <li>Open <code>audit-report.html</code> and scroll to the <strong>red cards</strong></li>
+      <li>Each red card shows exactly what went wrong in plain English under <em>"What needs to be checked"</em></li>
+      <li>Raise a bug ticket with:
+        <ul>
+          <li><strong>Title:</strong> use the API name shown on the card (e.g. "Dashboard Patients API — record count mismatch")</li>
+          <li><strong>Description:</strong> copy the text from the "What needs to be checked" section</li>
+          <li><strong>Attachment:</strong> attach the full <code>audit-report.html</code> file as evidence</li>
+        </ul>
+      </li>
+      <li>After the developer fixes the issue, run <code>npm run audit</code> again to re-verify</li>
+    </ol>
+
+    <div class="warn">
+      &#9888; <strong>Do not sign off</strong> if any APIs are showing FAIL. Even if the UI looks correct visually, the data returned by the API may be wrong.
+    </div>
+  </div>
+
+  <!-- FAQ -->
+  <div class="card">
+    <h2>&#10067; Common questions</h2>
+
+    <div class="faq-item">
+      <div class="faq-q">Do I need to log in every time I run the tool?</div>
+      <div class="faq-a">No. After you log in the first time, your session is saved. The next time you run the tool, it will skip the login automatically. If your session expires, it will ask you to log in again.</div>
+    </div>
+
+    <div class="faq-item">
+      <div class="faq-q">The page URL changes every time I log in. What do I do?</div>
+      <div class="faq-a">Copy the full URL from your browser after logging in, then run the command like this:<br>
+        <div class="cmd">npm run audit -- --url "paste-your-full-url-here"</div>
+      </div>
+    </div>
+
+    <div class="faq-item">
+      <div class="faq-q">I don't see any APIs being captured. What's wrong?</div>
+      <div class="faq-a">Make sure you actually interacted with the page after it loaded — click a filter, open a tab, or trigger an action. The tool only captures APIs that fire while you're using the page.</div>
+    </div>
+
+    <div class="faq-item">
+      <div class="faq-q">Can I test multiple pages in one run?</div>
+      <div class="faq-a">Yes. After the browser opens, you can navigate to as many pages as you want. The tool will capture all matching API calls across all pages until you press Enter.</div>
+    </div>
+
+    <div class="faq-item">
+      <div class="faq-q">Where is the report saved?</div>
+      <div class="faq-a">The report is saved as <code>audit-report.html</code> inside the <code>api-capture-compare</code> project folder. It's a regular HTML file — just double-click it to open in any browser. You can email it or share it like any other file.</div>
+    </div>
+
+    <div class="faq-item">
+      <div class="faq-q">Is my password stored anywhere?</div>
+      <div class="faq-a">No. The tool only saves your browser session (cookies) in a file called <code>browser-state.json</code> on your computer. Your actual username and password are never stored.</div>
+    </div>
+
+    <div class="faq-item">
+      <div class="faq-q">Something went wrong and I want to start fresh. What do I do?</div>
+      <div class="faq-a">Delete the file <code>browser-state.json</code> from the project folder. The next run will ask you to log in again from scratch.</div>
+    </div>
+  </div>
+
+  <!-- QUICK REFERENCE -->
+  <div class="card" style="background:#1a237e;color:#fff">
+    <h2 style="color:#fff">&#9889; Quick reference card</h2>
+    <p style="color:#c5cae9">Cut this out and keep it on your desk.</p>
+
+    <div style="background:rgba(255,255,255,.1);border-radius:8px;padding:18px 22px;margin-bottom:12px">
+      <div style="font-weight:700;color:#90caf9;margin-bottom:8px">Run the check (standard)</div>
+      <div class="cmd" style="background:rgba(0,0,0,.3)">npm run audit</div>
+    </div>
+
+    <div style="background:rgba(255,255,255,.1);border-radius:8px;padding:18px 22px;margin-bottom:12px">
+      <div style="font-weight:700;color:#90caf9;margin-bottom:8px">Run with a dynamic page URL</div>
+      <div style="color:#c5cae9;font-size:12px;margin-bottom:6px">Use this when the URL has a key that changes every time you log in</div>
+      <div class="cmd" style="background:rgba(0,0,0,.3)">npm run audit -- --url "https://app.company.com/dashboard?APP_KEY=paste-key-here"</div>
+    </div>
+
+    <div style="background:rgba(255,255,255,.1);border-radius:8px;padding:18px 22px;margin-bottom:12px">
+      <div style="font-weight:700;color:#90caf9;margin-bottom:8px">Open the report</div>
+      <div class="cmd" style="background:rgba(0,0,0,.3)">open audit-report.html        (Mac — or double-click the file)
+audit-report.html             (Windows — double-click the file)</div>
+    </div>
+
+    <div style="background:rgba(255,255,255,.1);border-radius:8px;padding:18px 22px">
+      <div style="font-weight:700;color:#90caf9;margin-bottom:8px">Reset login session</div>
+      <div style="color:#c5cae9;font-size:12px;margin-bottom:6px">Do this if the tool logs you into the wrong account or session has expired</div>
+      <div class="cmd" style="background:rgba(0,0,0,.3)">Delete the file: browser-state.json   (then run npm run audit again)</div>
+    </div>
+  </div>
+
+  <div style="text-align:center;color:#aaa;font-size:12px;padding:16px 0 32px">
+    API Migration Check Tool &nbsp;·&nbsp; QA Guide
+  </div>
+
+</div>
+</body>
+</html>

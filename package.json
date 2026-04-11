@@ -4,7 +4,8 @@
   "description": "Capture API calls via Playwright and compare responses across base URLs",
   "scripts": {
     "capture": "ts-node src/capture.ts",
-    "compare": "ts-node src/compare.ts"
+    "compare": "ts-node src/compare.ts",
+    "audit":   "ts-node src/audit.ts"
   },
   "dependencies": {
     "chalk": "^4.1.2",
