@@ -1,17 +1,32 @@
+/**
+ * audit.ts  —  simplified one-command API auditor
+ *
+ * Usage:
+ *   npm run audit
+ *   npm run audit -- --url "https://app.example.com/page?KEY=abc"
+ *   npm run audit -- --apis "api/v1/payments,api/v1/users" --newBase "https://new.example.com"
+ *
+ * Flow:
+ *   1. Browser opens → login page (or saved session skips login entirely)
+ *   2. Log in → browser automatically detects you are past the login page
+ *   3. Navigate to any pages you want to audit
+ *   4. Press Ctrl+C in the terminal  OR  close the browser window
+ *   5. Report is generated automatically
+ */
+
 import { chromium, BrowserContext, Request, Response } from 'playwright';
 import * as fs from 'fs';
 import * as path from 'path';
-import * as readline from 'readline';
 import { Command } from 'commander';
 import chalk from 'chalk';
 import { config } from './config';
 import { auditCompare, AuditComparison } from './utils/audit-diff';
 
-const STATE_FILE    = path.resolve(__dirname, '..', 'browser-state.json');
-const REPORT_JSON   = path.resolve(__dirname, '..', 'audit-report.json');
-const REPORT_HTML   = path.resolve(__dirname, '..', 'audit-report.html');
-const CALLS_JSON    = path.resolve(__dirname, '..', 'api-calls-log.json');
-const CALLS_TXT     = path.resolve(__dirname, '..', 'api-calls-log.txt');
+const STATE_FILE  = path.resolve(__dirname, '..', 'browser-state.json');
+const REPORT_JSON = path.resolve(__dirname, '..', 'audit-report.json');
+const REPORT_HTML = path.resolve(__dirname, '..', 'audit-report.html');
+const CALLS_JSON  = path.resolve(__dirname, '..', 'api-calls-log.json');
+const CALLS_TXT   = path.resolve(__dirname, '..', 'api-calls-log.txt');
 
 interface AuditEntry {
   id:          number;
@@ -21,45 +36,27 @@ interface AuditEntry {
   comparison:  AuditComparison;
 }
 
-// ─── helpers ─────────────────────────────────────────────────────────────────
-
-function waitForEnter(prompt: string): Promise<void> {
-  const rl = readline.createInterface({ input: process.stdin, output: process.stdout });
-  return new Promise((resolve) => {
-    rl.question(prompt, () => { rl.close(); resolve(); });
-  });
-}
-
-async function saveState(context: BrowserContext): Promise<void> {
-  const state = await context.storageState();
-  fs.writeFileSync(STATE_FILE, JSON.stringify(state, null, 2));
-  console.log(chalk.gray(`\n[audit] Session saved to ${STATE_FILE}`));
-}
+// ─── helpers ──────────────────────────────────────────────────────────────────
 
 function matchesAuditList(url: string, patterns: string[]): boolean {
-  if (patterns.length === 0) return false;
-  return patterns.some((p) => url.includes(p));
+  return patterns.length > 0 && patterns.some((p) => url.includes(p));
 }
 
-function swapBase(url: string, originalBase: string, newBase: string): string {
+function swapBase(url: string, originalOrigin: string, newBase: string): string {
   return url.replace(
-    originalBase.replace(/\/$/, ''),
+    originalOrigin.replace(/\/$/, ''),
     newBase.replace(/\/$/, ''),
   );
 }
 
-// Headers that must NOT be forwarded to the new host
 const SKIP_HEADERS = new Set([
-  'host',
-  'content-length',
-  'transfer-encoding',
-  'connection',
-  'origin',        // would point to old host — causes CORS rejection
-  'referer',       // would point to old host page
+  'host', 'content-length', 'transfer-encoding',
+  'connection', 'origin', 'referer',
 ]);
 
-// Headers we log so you can confirm auth is forwarded
-const AUTH_HEADER_PREFIXES = ['authorization', 'cookie', 'x-auth', 'x-token', 'x-api-key', 'x-access-token'];
+const AUTH_PREFIXES = [
+  'authorization', 'cookie', 'x-auth', 'x-token', 'x-api-key', 'x-access-token',
+];
 
 function forwardableHeaders(headers: Record<string, string>): {
   filtered: Record<string, string>;
@@ -67,12 +64,10 @@ function forwardableHeaders(headers: Record<string, string>): {
 } {
   const filtered: Record<string, string> = {};
   const authFound: string[] = [];
-
   for (const [k, v] of Object.entries(headers)) {
     if (SKIP_HEADERS.has(k.toLowerCase())) continue;
     filtered[k] = v;
-    if (AUTH_HEADER_PREFIXES.some((prefix) => k.toLowerCase().startsWith(prefix))) {
-      // show key name + masked value (first 12 chars)
+    if (AUTH_PREFIXES.some((p) => k.toLowerCase().startsWith(p))) {
       authFound.push(`${k}: ${v.slice(0, 12)}…`);
     }
   }
@@ -80,18 +75,16 @@ function forwardableHeaders(headers: Record<string, string>): {
 }
 
 async function replayRequest(
-  method: string,
-  url: string,
-  headers: Record<string, string>,
+  method:   string,
+  url:      string,
+  headers:  Record<string, string>,
   postData: string | null,
 ): Promise<{ status: number; body: unknown; authFound: string[] }> {
   const { filtered, authFound } = forwardableHeaders(headers);
-
   const init: RequestInit = { method, headers: filtered };
   if (postData && !['GET', 'HEAD'].includes(method.toUpperCase())) {
     init.body = postData;
   }
-
   const res  = await fetch(url, init);
   const ct   = res.headers.get('content-type') ?? '';
   const body = ct.includes('application/json') ? await res.json() : await res.text();
@@ -101,14 +94,13 @@ async function replayRequest(
 async function parseResponseBody(response: Response): Promise<unknown> {
   try {
     const ct = response.headers()['content-type'] ?? '';
-    if (ct.includes('application/json')) return await response.json();
-    return await response.text();
+    return ct.includes('application/json') ? await response.json() : await response.text();
   } catch {
     return null;
   }
 }
 
-// ─── HTML report ─────────────────────────────────────────────────────────────
+// ─── deduplication ────────────────────────────────────────────────────────────
 
 function endpointKey(url: string): string {
   try { return new URL(url).pathname; } catch { return url; }
@@ -123,91 +115,19 @@ function deduplicateByPath(entries: AuditEntry[]): AuditEntry[] {
   return [...seen.values()];
 }
 
-function writeCallsLog(entries: AuditEntry[], newBase: string, auditPatterns: string[]): void {
-  const generated = new Date().toLocaleString();
+// ─── pass / fail ──────────────────────────────────────────────────────────────
 
-  // ── JSON log ──
-  const jsonLog = {
-    generatedAt:     new Date().toISOString(),
-    newApiBase:      newBase,
-    auditedApis:     auditPatterns,
-    uniqueEndpoints: entries.length,
-    calls: entries.map((e) => ({
-      id:           e.id,
-      method:       e.method,
-      legacyUrl:    e.originalUrl,
-      newUrl:       e.newUrl,
-      legacyStatus: e.comparison.originalStatus,
-      newStatus:    e.comparison.newStatus,
-      result:       pass(e) ? 'PASS' : 'FAIL',
-    })),
-  };
-  fs.writeFileSync(CALLS_JSON, JSON.stringify(jsonLog, null, 2));
-
-  // ── Plain text log ──
-  const divider = '─'.repeat(80);
-  const lines: string[] = [
-    '╔══════════════════════════════════════════════════════════════════════════════╗',
-    '║              API CALLS LOG — Legacy vs New                                  ║',
-    '╚══════════════════════════════════════════════════════════════════════════════╝',
-    '',
-    `  Generated : ${generated}`,
-    `  New server: ${newBase}`,
-    `  APIs watched: ${auditPatterns.join(', ')}`,
-    `  Total calls : ${entries.length}`,
-    '',
-    divider,
-    '',
-  ];
-
-  for (const e of entries) {
-    const result  = pass(e) ? '✓ PASS' : '✗ FAIL';
-    const statusOld = e.comparison.originalStatus ?? '—';
-    const statusNew = e.comparison.newStatus ?? '—';
-    const countOld  = e.comparison.originalCount !== null ? String(e.comparison.originalCount) : '—';
-    const countNew  = e.comparison.newCount !== null      ? String(e.comparison.newCount)      : '—';
-
-    lines.push(`  #${e.id}  [${e.method}]  ${result}`);
-    lines.push('');
-    lines.push(`  LEGACY  (${statusOld})  ${e.originalUrl}`);
-    lines.push(`  NEW     (${statusNew})  ${e.newUrl}`);
-    lines.push('');
-    lines.push(`  Records: ${countOld} (legacy)  →  ${countNew} (new)  ${e.comparison.countMatch === false ? '⚠ MISMATCH' : e.comparison.countMatch === true ? '✓ Match' : ''}`);
-
-    if (!e.comparison.keysMatch) {
-      if (e.comparison.missingKeys.length)
-        lines.push(`  Missing fields in new: ${e.comparison.missingKeys.join(', ')}`);
-      if (e.comparison.extraKeys.length)
-        lines.push(`  Extra fields in new:   ${e.comparison.extraKeys.join(', ')}`);
-    }
-
-    if (e.comparison.error) {
-      lines.push(`  ERROR: ${e.comparison.error}`);
-    }
-
-    lines.push('');
-    lines.push(divider);
-    lines.push('');
-  }
-
-  const passCount = entries.filter(pass).length;
-  lines.push(`  SUMMARY:  ${passCount} PASS  /  ${entries.length - passCount} FAIL  /  ${entries.length} TOTAL`);
-  lines.push('');
-
-  fs.writeFileSync(CALLS_TXT, lines.join('\n'));
-}
-
-function pass(e: AuditEntry): boolean {
+function isPassed(e: AuditEntry): boolean {
   const c = e.comparison;
   return c.statusMatch && c.keysMatch && c.countMatch !== false && !c.error;
 }
 
+// ─── reports ──────────────────────────────────────────────────────────────────
+
 function apiLabel(url: string): string {
   try {
-    const u = new URL(url);
-    // Turn /api/paycheck-details into "Paycheck Details"
-    const parts = u.pathname.split('/').filter(Boolean);
-    const last  = parts[parts.length - 1] ?? u.pathname;
+    const parts = new URL(url).pathname.split('/').filter(Boolean);
+    const last  = parts[parts.length - 1] ?? url;
     return last.replace(/[-_]/g, ' ').replace(/\b\w/g, (c) => c.toUpperCase());
   } catch { return url; }
 }
@@ -215,159 +135,264 @@ function apiLabel(url: string): string {
 function issueList(c: AuditComparison): string[] {
   const issues: string[] = [];
   if (!c.statusMatch)
-    issues.push(`Old system responded <b>${c.originalStatus}</b>, new system responded <b>${c.newStatus}</b>`);
+    issues.push(`Status changed: old system returned <strong>${c.originalStatus}</strong>, new system returned <strong>${c.newStatus}</strong>`);
   if (c.countMatch === false)
-    issues.push(`Record count changed: old system returned <b>${c.originalCount}</b> records, new system returned <b>${c.newCount}</b>`);
+    issues.push(`Record count changed: old system returned <strong>${c.originalCount}</strong> records, new system returned <strong>${c.newCount}</strong>`);
   if (c.missingKeys.length)
-    issues.push(`New system is missing data fields: <b>${c.missingKeys.join(', ')}</b>`);
+    issues.push(`New system is <strong>missing</strong> these fields: <code>${c.missingKeys.join(', ')}</code>`);
   if (c.extraKeys.length)
-    issues.push(`New system has extra data fields: <b>${c.extraKeys.join(', ')}</b>`);
+    issues.push(`New system has <strong>extra</strong> fields not in old system: <code>${c.extraKeys.join(', ')}</code>`);
   if (c.error)
-    issues.push(`Could not reach new system: ${c.error}`);
+    issues.push(`Could not reach new system: <code>${c.error}</code>`);
   return issues;
 }
 
-function renderHtml(entries: AuditEntry[], originalBase: string, newBase: string, auditPatterns: string[]): string {
-  const passCount  = entries.filter(pass).length;
+function renderHtml(
+  entries:       AuditEntry[],
+  originalBase:  string,
+  newBase:       string,
+  auditPatterns: string[],
+): string {
+  const passCount  = entries.filter(isPassed).length;
   const failCount  = entries.length - passCount;
   const allPass    = failCount === 0;
-  const generated  = new Date().toLocaleString();
   const pct        = entries.length > 0 ? Math.round((passCount / entries.length) * 100) : 0;
+  const generated  = new Date().toLocaleString();
 
   const overallBanner = allPass
-    ? `<div style="background:#e8f5e9;border-left:5px solid #2e7d32;padding:16px 20px;border-radius:6px;margin-bottom:24px">
-         <div style="font-size:20px;font-weight:700;color:#2e7d32">&#10003; All APIs are working correctly on the new system</div>
-         <div style="color:#388e3c;margin-top:4px">Every checked API returned the same data as the old system. The migration looks good.</div>
+    ? `<div class="banner pass-banner">
+        <span class="banner-icon">✓</span>
+        <div><strong>All APIs are working correctly on the new system</strong><br>
+        Every checked API returned the same structure as the old system.</div>
        </div>`
-    : `<div style="background:#fff8e1;border-left:5px solid #f9a825;padding:16px 20px;border-radius:6px;margin-bottom:24px">
-         <div style="font-size:20px;font-weight:700;color:#e65100">&#9888; ${failCount} API${failCount > 1 ? 's need' : ' needs'} attention</div>
-         <div style="color:#795548;margin-top:4px">${passCount} out of ${entries.length} APIs passed. Please review the failed items below before sign-off.</div>
+    : `<div class="banner fail-banner">
+        <span class="banner-icon">⚠</span>
+        <div><strong>${failCount} API${failCount > 1 ? 's need' : ' needs'} attention</strong><br>
+        ${passCount} out of ${entries.length} APIs passed. Please review the failed items below.</div>
        </div>`;
 
   const cards = entries.map((e) => {
-    const c       = e.comparison;
-    const isPassed = pass(e);
+    const c        = e.comparison;
+    const passed   = isPassed(e);
     const issues   = issueList(c);
     const label    = apiLabel(e.originalUrl);
 
+    const countBadge = c.countMatch === false
+      ? `<span class="badge badge-warn">▲ Count differs</span>`
+      : c.countMatch === true
+        ? `<span class="badge badge-ok">✓ Match</span>`
+        : '';
+
     const recordLine = (c.originalCount !== null || c.newCount !== null)
-      ? `<div style="display:flex;gap:32px;margin-top:10px">
-           <div>
-             <div style="font-size:11px;color:#888;text-transform:uppercase;letter-spacing:.5px">Old System Records</div>
-             <div style="font-size:22px;font-weight:700;color:#1565c0">${c.originalCount ?? '—'}</div>
-           </div>
-           <div style="align-self:center;font-size:22px;color:#bbb">→</div>
-           <div>
-             <div style="font-size:11px;color:#888;text-transform:uppercase;letter-spacing:.5px">New System Records</div>
-             <div style="font-size:22px;font-weight:700;color:${c.countMatch === false ? '#c62828' : '#2e7d32'}">${c.newCount ?? '—'}</div>
-           </div>
-           ${c.countMatch !== false
-             ? `<div style="align-self:center;margin-left:8px;font-size:18px;color:#2e7d32">&#10003; Match</div>`
-             : `<div style="align-self:center;margin-left:8px;font-size:14px;color:#c62828;font-weight:600">&#9650; Count differs</div>`}
+      ? `<div class="record-row">
+           <div class="record-box"><div class="record-label">Old Records</div><div class="record-num">${c.originalCount ?? '—'}</div></div>
+           <div class="record-arrow">→</div>
+           <div class="record-box"><div class="record-label">New Records</div><div class="record-num">${c.newCount ?? '—'}</div></div>
+           ${countBadge}
          </div>`
-      : `<div style="margin-top:10px;color:#aaa;font-size:13px">No record count available for this API</div>`;
+      : `<p class="dim">No record count available</p>`;
+
+    const keySection = (label: string, keys: string[], cls: string) =>
+      keys.length === 0 ? '' :
+      `<div class="key-group">
+         <div class="key-group-label ${cls}">${label} (${keys.length})</div>
+         <div class="key-chips">
+           ${keys.map((k) => `<span class="chip ${cls}">${k}</span>`).join('')}
+         </div>
+       </div>`;
+
+    const keyBlock = (!c.keysMatch)
+      ? `<div class="key-diff">
+           ${keySection('Missing in new system', c.missingKeys, 'missing')}
+           ${keySection('Extra in new system',   c.extraKeys,   'extra')}
+         </div>`
+      : `<p class="dim key-ok">✓ All nested keys match between old and new system</p>`;
 
     const issueBlock = issues.length
-      ? `<div style="margin-top:14px;padding:12px 16px;background:#fff3e0;border-radius:6px;border-left:4px solid #ff9800">
-           <div style="font-weight:600;color:#e65100;margin-bottom:6px">What needs to be checked:</div>
-           <ul style="margin:0;padding-left:18px;color:#5d4037;font-size:13px;line-height:1.8">
-             ${issues.map((i) => `<li>${i}</li>`).join('')}
-           </ul>
-         </div>`
-      : `<div style="margin-top:14px;padding:10px 16px;background:#f1f8e9;border-radius:6px;color:#558b2f;font-size:13px">
-           &#10003; Everything looks correct — same records, same data structure, same response.
-         </div>`;
-
-    const urlBlock = `<div style="margin-top:10px;font-size:11px;color:#aaa;word-break:break-all">
-      <span style="font-weight:600">Checked:</span> ${e.originalUrl}<br>
-      <span style="font-weight:600">Against:</span> ${e.newUrl}
-    </div>`;
+      ? `<div class="issues"><div class="issues-title">What needs attention:</div>
+           <ul>${issues.map((i) => `<li>${i}</li>`).join('')}</ul></div>`
+      : `<p class="ok-msg">✓ Structure and record count look correct.</p>`;
 
     return `
-      <div style="background:#fff;border-radius:10px;box-shadow:0 1px 4px rgba(0,0,0,.08);
-                  padding:22px 26px;margin-bottom:16px;
-                  border-left:5px solid ${isPassed ? '#4caf50' : '#ef5350'}">
-        <div style="display:flex;justify-content:space-between;align-items:flex-start">
-          <div>
-            <div style="font-size:18px;font-weight:700;color:#222">${label}</div>
-            <div style="font-size:12px;color:#999;margin-top:2px">${e.method} &nbsp;·&nbsp; API #${e.id}</div>
-          </div>
-          <div style="flex-shrink:0;margin-left:16px">
-            ${isPassed
-              ? `<span style="background:#e8f5e9;color:#2e7d32;padding:6px 18px;border-radius:20px;font-weight:700;font-size:14px">&#10003; PASS</span>`
-              : `<span style="background:#ffebee;color:#c62828;padding:6px 18px;border-radius:20px;font-weight:700;font-size:14px">&#10007; FAIL</span>`}
-          </div>
+    <div class="card ${passed ? 'card-pass' : 'card-fail'}">
+      <div class="card-header">
+        <div>
+          <div class="card-title">${label}</div>
+          <div class="card-meta">${e.method} · API #${e.id}</div>
         </div>
+        <div class="badge ${passed ? 'badge-pass' : 'badge-fail'}">${passed ? '✓ PASS' : '✗ FAIL'}</div>
+      </div>
+      <div class="card-body">
         ${recordLine}
         ${issueBlock}
-        ${urlBlock}
-      </div>`;
+        ${keyBlock}
+        <div class="url-block">
+          <div><span class="url-label">Old:</span> <span class="url-text">${e.originalUrl}</span></div>
+          <div><span class="url-label">New:</span> <span class="url-text">${e.newUrl}</span></div>
+        </div>
+      </div>
+    </div>`;
   }).join('');
 
   return `<!DOCTYPE html>
 <html lang="en">
 <head>
-  <meta charset="UTF-8"/>
-  <meta name="viewport" content="width=device-width,initial-scale=1"/>
-  <title>API Migration Check Report</title>
-  <style>
-    * { box-sizing:border-box }
-    body { font-family:-apple-system,BlinkMacSystemFont,'Segoe UI',Roboto,sans-serif;
-           margin:0;padding:32px;background:#f0f2f5;color:#222;max-width:960px;margin:0 auto;padding:32px 24px }
-    h1   { font-size:26px;margin:0 0 4px;color:#1a237e }
-    .sub { color:#888;font-size:13px;margin-bottom:28px }
-  </style>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width,initial-scale=1">
+<title>API Audit Report</title>
+<style>
+*{box-sizing:border-box;margin:0;padding:0}
+body{font-family:-apple-system,BlinkMacSystemFont,'Segoe UI',Roboto,sans-serif;background:#f0f2f5;color:#222;padding:32px 16px}
+.wrap{max-width:960px;margin:0 auto}
+h1{font-size:24px;color:#1a237e;margin-bottom:4px}
+.sub{color:#888;font-size:13px;margin-bottom:24px}
+
+/* banner */
+.banner{display:flex;align-items:flex-start;gap:16px;padding:20px 24px;border-radius:10px;margin-bottom:24px;font-size:15px}
+.banner-icon{font-size:28px;line-height:1}
+.pass-banner{background:#e8f5e9;border-left:5px solid #43a047}
+.fail-banner{background:#fff3e0;border-left:5px solid #fb8c00}
+
+/* stats */
+.stats{display:flex;gap:12px;flex-wrap:wrap;margin-bottom:24px}
+.stat{background:#fff;border-radius:10px;padding:16px 20px;flex:1;min-width:120px;text-align:center;box-shadow:0 1px 4px rgba(0,0,0,.08)}
+.stat-num{font-size:32px;font-weight:700;color:#1a237e}
+.stat-label{font-size:12px;color:#888;margin-top:4px}
+.stat-num.green{color:#43a047}
+.stat-num.red{color:#e53935}
+
+/* meta */
+.meta-box{background:#fff;border-radius:10px;padding:16px 20px;margin-bottom:24px;font-size:13px;color:#555;box-shadow:0 1px 4px rgba(0,0,0,.08)}
+.meta-box strong{color:#333}
+
+/* cards */
+.card{background:#fff;border-radius:10px;margin-bottom:16px;box-shadow:0 1px 4px rgba(0,0,0,.08);overflow:hidden}
+.card-pass{border-left:5px solid #43a047}
+.card-fail{border-left:5px solid #e53935}
+.card-header{display:flex;justify-content:space-between;align-items:flex-start;padding:16px 20px;border-bottom:1px solid #f0f0f0}
+.card-title{font-size:16px;font-weight:600;color:#1a237e}
+.card-meta{font-size:12px;color:#888;margin-top:4px}
+.card-body{padding:16px 20px;display:flex;flex-direction:column;gap:12px}
+
+/* badges */
+.badge{display:inline-block;padding:4px 12px;border-radius:20px;font-size:13px;font-weight:600;white-space:nowrap}
+.badge-pass{background:#e8f5e9;color:#2e7d32}
+.badge-fail{background:#ffebee;color:#c62828}
+.badge-ok{background:#e8f5e9;color:#2e7d32;font-size:12px}
+.badge-warn{background:#fff3e0;color:#e65100;font-size:12px}
+
+/* record row */
+.record-row{display:flex;align-items:center;gap:12px;flex-wrap:wrap}
+.record-box{background:#f5f5f5;border-radius:8px;padding:10px 16px;text-align:center;min-width:90px}
+.record-label{font-size:11px;color:#888}
+.record-num{font-size:24px;font-weight:700;color:#1a237e}
+.record-arrow{font-size:20px;color:#aaa}
+
+/* issues */
+.issues{background:#fff8e1;border-radius:8px;padding:14px 16px}
+.issues-title{font-weight:600;font-size:13px;color:#e65100;margin-bottom:8px}
+.issues ul{padding-left:18px}
+.issues li{font-size:14px;line-height:1.8;color:#444}
+.ok-msg{color:#2e7d32;font-size:14px}
+
+/* key diff */
+.key-diff{display:flex;flex-direction:column;gap:10px}
+.key-group-label{font-size:12px;font-weight:700;margin-bottom:6px;padding:3px 8px;border-radius:4px;display:inline-block}
+.missing{background:#ffebee;color:#c62828}
+.extra{background:#e3f2fd;color:#1565c0}
+.key-chips{display:flex;flex-wrap:wrap;gap:6px}
+.chip{font-size:11px;padding:3px 8px;border-radius:4px;font-family:monospace}
+.chip.missing{background:#ffebee;color:#c62828}
+.chip.extra{background:#e3f2fd;color:#1565c0}
+.key-ok{color:#2e7d32;font-size:13px}
+
+/* url block */
+.url-block{font-size:12px;color:#888;border-top:1px solid #f0f0f0;padding-top:10px;word-break:break-all}
+.url-block div{margin-bottom:3px}
+.url-label{font-weight:600;color:#aaa}
+.url-text{color:#999}
+.dim{color:#aaa;font-size:13px}
+
+footer{text-align:center;margin-top:32px;font-size:12px;color:#bbb}
+</style>
 </head>
 <body>
-
-  <h1>&#128203; API Migration Check Report</h1>
-  <div class="sub">
-    Generated on ${generated} &nbsp;·&nbsp;
-    ${entries.length} APIs checked &nbsp;·&nbsp;
-    ${pct}% passing
-  </div>
+<div class="wrap">
+  <h1>📋 API Audit Report</h1>
+  <div class="sub">Generated on ${generated} · ${entries.length} APIs checked · ${pct}% passing</div>
 
   ${overallBanner}
 
-  <div style="display:flex;gap:12px;margin-bottom:28px;flex-wrap:wrap">
-    <div style="flex:1;min-width:130px;background:#fff;border-radius:10px;padding:18px 22px;
-                box-shadow:0 1px 4px rgba(0,0,0,.08);text-align:center">
-      <div style="font-size:36px;font-weight:800;color:#2e7d32">${passCount}</div>
-      <div style="color:#666;font-size:13px;margin-top:4px">APIs Working &#10003;</div>
-    </div>
-    <div style="flex:1;min-width:130px;background:#fff;border-radius:10px;padding:18px 22px;
-                box-shadow:0 1px 4px rgba(0,0,0,.08);text-align:center">
-      <div style="font-size:36px;font-weight:800;color:#c62828">${failCount}</div>
-      <div style="color:#666;font-size:13px;margin-top:4px">APIs Need Attention &#9888;</div>
-    </div>
-    <div style="flex:1;min-width:130px;background:#fff;border-radius:10px;padding:18px 22px;
-                box-shadow:0 1px 4px rgba(0,0,0,.08);text-align:center">
-      <div style="font-size:36px;font-weight:800;color:#1565c0">${entries.length}</div>
-      <div style="color:#666;font-size:13px;margin-top:4px">Total APIs Checked</div>
-    </div>
-    <div style="flex:1;min-width:130px;background:#fff;border-radius:10px;padding:18px 22px;
-                box-shadow:0 1px 4px rgba(0,0,0,.08);text-align:center">
-      <div style="font-size:36px;font-weight:800;color:#6a1b9a">${pct}%</div>
-      <div style="color:#666;font-size:13px;margin-top:4px">Pass Rate</div>
-    </div>
+  <div class="stats">
+    <div class="stat"><div class="stat-num green">${passCount}</div><div class="stat-label">APIs Working ✓</div></div>
+    <div class="stat"><div class="stat-num red">${failCount}</div><div class="stat-label">Need Attention ⚠</div></div>
+    <div class="stat"><div class="stat-num">${entries.length}</div><div class="stat-label">Total Checked</div></div>
+    <div class="stat"><div class="stat-num">${pct}%</div><div class="stat-label">Pass Rate</div></div>
   </div>
 
-  <div style="background:#fff;border-radius:10px;padding:16px 22px;margin-bottom:28px;
-              box-shadow:0 1px 4px rgba(0,0,0,.08);font-size:12px;color:#666;line-height:1.8">
-    <b style="color:#333">Migration details</b><br>
-    Old system: <b style="color:#222">${originalBase}</b><br>
-    New system: <b style="color:#222">${newBase}</b>
+  <div class="meta-box">
+    <strong>Old system:</strong> ${originalBase} &nbsp;·&nbsp;
+    <strong>New system:</strong> ${newBase} &nbsp;·&nbsp;
+    <strong>APIs watched:</strong> ${auditPatterns.join(', ')}
   </div>
 
-  <div style="font-size:16px;font-weight:700;color:#333;margin-bottom:14px">Results per API</div>
-  ${cards}
+  <div id="results">${cards}</div>
 
-  <div style="text-align:center;color:#bbb;font-size:11px;margin-top:32px;padding-top:16px;border-top:1px solid #eee">
-    Report generated automatically &nbsp;·&nbsp; ${generated}
-  </div>
-
+  <footer>Report generated automatically · ${generated}</footer>
+</div>
 </body>
 </html>`;
+}
+
+function writeCallsLog(entries: AuditEntry[], newBase: string, patterns: string[]): void {
+  const generated = new Date().toLocaleString();
+  const jsonLog = {
+    generatedAt: new Date().toISOString(),
+    newApiBase: newBase,
+    auditedApis: patterns,
+    uniqueEndpoints: entries.length,
+    calls: entries.map((e) => ({
+      id: e.id,
+      method: e.method,
+      legacyUrl: e.originalUrl,
+      newUrl: e.newUrl,
+      legacyStatus: e.comparison.originalStatus,
+      newStatus: e.comparison.newStatus,
+      result: isPassed(e) ? 'PASS' : 'FAIL',
+    })),
+  };
+  fs.writeFileSync(CALLS_JSON, JSON.stringify(jsonLog, null, 2));
+
+  const divider = '─'.repeat(80);
+  const lines = [
+    '╔══════════════════════════════════════════════════════════════════════════════╗',
+    '║                     API CALLS LOG — Legacy vs New                           ║',
+    '╚══════════════════════════════════════════════════════════════════════════════╝',
+    '', ` Generated : ${generated}`, ` New server: ${newBase}`,
+    ` APIs watched: ${patterns.join(', ')}`, ` Total calls : ${entries.length}`, '', divider, '',
+  ];
+
+  for (const e of entries) {
+    const result   = isPassed(e) ? '✓ PASS' : '✗ FAIL';
+    const c        = e.comparison;
+    lines.push(` #${e.id} [${e.method}] ${result}`);
+    lines.push('');
+    lines.push(`  LEGACY (${c.originalStatus ?? '—'}) ${e.originalUrl}`);
+    lines.push(`  NEW    (${c.newStatus ?? '—'}) ${e.newUrl}`);
+    lines.push('');
+    if (c.originalCount !== null || c.newCount !== null) {
+      const countState = c.countMatch === false ? '⚠ MISMATCH' : c.countMatch === true ? '✓ Match' : '';
+      lines.push(`  Records: ${c.originalCount ?? '—'} (old) → ${c.newCount ?? '—'} (new) ${countState}`);
+    }
+    if (c.missingKeys.length) lines.push(`  Missing fields in new: ${c.missingKeys.join(', ')}`);
+    if (c.extraKeys.length)   lines.push(`  Extra fields in new:   ${c.extraKeys.join(', ')}`);
+    if (c.error)              lines.push(`  ERROR: ${c.error}`);
+    lines.push('', divider, '');
+  }
+
+  const passCount = entries.filter(isPassed).length;
+  lines.push(` SUMMARY: ${passCount} PASS / ${entries.length - passCount} FAIL / ${entries.length} TOTAL`, '');
+  fs.writeFileSync(CALLS_TXT, lines.join('\n'));
 }
 
 // ─── main ─────────────────────────────────────────────────────────────────────
@@ -376,96 +401,78 @@ async function run(): Promise<void> {
   const program = new Command();
   program
     .name('audit')
-    .description('Intercept specific APIs, simultaneously replay against new base, compare keys + counts')
-    .option('--url <url>',     'Full target URL (overrides TARGET_PATH in .env — use for dynamic keys)')
-    .option('--apis <patterns>', 'Comma-separated API path patterns to watch (overrides AUDIT_APIS in .env)')
-    .option('--newBase <url>', 'New base URL to replay against (overrides NEW_BASE_URL in .env)')
+    .description('Intercept APIs, replay against new host, compare nested structure')
+    .option('--url <url>',     'Full target URL to navigate to (overrides TARGET_PATH in .env)')
+    .option('--apis <list>',   'Comma-separated API path patterns (overrides AUDIT_APIS in .env)')
+    .option('--newBase <url>', 'New base URL to replay against (overrides NEW_API_BASE in .env)')
     .parse(process.argv);
 
-  const opts = program.opts<{ url?: string; apis?: string; newBase?: string }>();
-
-  // Resolve runtime overrides
-  const targetUrl   = opts.url ?? config.targetUrl;
-  const newBase     = opts.newBase ?? config.newApiBase ?? config.newBaseUrl;
-  const auditApis   = opts.apis
+  const opts     = program.opts<{ url?: string; apis?: string; newBase?: string }>();
+  const newBase  = opts.newBase  ?? config.newApiBase ?? config.newBaseUrl;
+  const auditApis = opts.apis
     ? opts.apis.split(',').map((s) => s.trim()).filter(Boolean)
     : config.auditApis;
 
   if (!newBase) {
-    console.error(chalk.red('[audit] No new base URL provided.'));
-    console.error(chalk.yellow('[audit] Set NEW_BASE_URL in .env or pass --newBase <url>'));
+    console.error(chalk.red('\n[audit] No new base URL set.'));
+    console.error(chalk.yellow('[audit] Add NEW_API_BASE=https://... to .env  or pass --newBase\n'));
     process.exit(1);
   }
-
   if (auditApis.length === 0) {
-    console.error(chalk.red('[audit] No API patterns defined.'));
-    console.error(chalk.yellow('[audit] Set AUDIT_APIS in .env (e.g. /api/paycheck,/api/employees) or pass --apis'));
+    console.error(chalk.red('\n[audit] No API patterns defined.'));
+    console.error(chalk.yellow('[audit] Add AUDIT_APIS=api/v1/foo,api/v1/bar to .env  or pass --apis\n'));
     process.exit(1);
   }
 
-  console.log(chalk.blue('\n[audit] Configuration'));
-  console.log(`  Target URL:      ${targetUrl}`);
-  console.log(`  New base URL:    ${newBase}`);
-  console.log(`  Watching APIs:   ${auditApis.join('  |  ')}\n`);
+  console.log(chalk.blue('\n[audit] ── Configuration ────────────────────────────'));
+  console.log(`  New base URL : ${newBase}`);
+  console.log(`  Watching     : ${auditApis.join(' | ')}`);
+  console.log(chalk.blue('[audit] ─────────────────────────────────────────────\n'));
 
-  // ── browser setup ──
-  const browser = await chromium.launch({ headless: false });
-  let context: BrowserContext;
+  // ── browser ──
+  const browser  = await chromium.launch({ headless: false });
   const stateExists = fs.existsSync(STATE_FILE);
+  let context: BrowserContext;
 
   if (stateExists) {
-    console.log(chalk.gray('[audit] Loading saved session...'));
+    console.log(chalk.gray('[audit] Loading saved session (no login needed)...'));
     context = await browser.newContext({ storageState: STATE_FILE });
   } else {
-    console.log(chalk.yellow('[audit] No saved session. Browser will open login page.'));
+    console.log(chalk.yellow('[audit] No saved session — browser will open the login page.'));
+    console.log(chalk.yellow('[audit] Log in, then navigate to the pages you want to audit.\n'));
     context = await browser.newContext();
   }
 
   const page = await context.newPage();
 
-  if (!stateExists) {
-    await page.goto(config.loginUrl, { waitUntil: 'load', timeout: 60000 });
-    await waitForEnter('\n[audit] Log in manually, then press Enter... ');
-    await saveState(context);
-  }
+  // ── intercept ──
+  const entries:    AuditEntry[] = [];
+  let   idCounter = 1;
+  const pending   = new Map<string, { id: number; method: string; url: string; headers: Record<string, string>; postData: string | null }>();
 
-  // ── intercept setup ──
-  const entries: AuditEntry[] = [];
-  let idCounter = 1;
-
-  const pendingMap = new Map<
-    string,
-    { id: number; method: string; url: string; headers: Record<string, string>; postData: string | null }
-  >();
-
-  page.on('request', (request: Request) => {
-    if (!matchesAuditList(request.url(), auditApis)) return;
+  page.on('request', (req: Request) => {
+    if (!matchesAuditList(req.url(), auditApis)) return;
     const id = idCounter++;
-    pendingMap.set(`${request.url()}|${id}`, {
-      id,
-      method:   request.method(),
-      url:      request.url(),
-      headers:  request.headers(),
-      postData: request.postData(),
+    pending.set(`${req.url()}|${id}`, {
+      id, method: req.method(), url: req.url(),
+      headers: req.headers(), postData: req.postData(),
     });
-    console.log(chalk.gray(`  [→] ${request.method()} ${request.url()}`));
+    console.log(chalk.gray(`  [→] ${req.method()} ${req.url()}`));
   });
 
-  page.on('response', async (response: Response) => {
-    const key = [...pendingMap.keys()].find((k) => k.startsWith(response.url() + '|'));
+  page.on('response', async (res: Response) => {
+    const key = [...pending.keys()].find((k) => k.startsWith(res.url() + '|'));
     if (!key) return;
+    const req = pending.get(key)!;
+    pending.delete(key);
 
-    const req = pendingMap.get(key)!;
-    pendingMap.delete(key);
+    const originalStatus = res.status();
+    const originalBody   = await parseResponseBody(res);
+    console.log(chalk.cyan(`  [←] ${originalStatus} ${res.url()}`));
 
-    const originalStatus = response.status();
-    const originalBody   = await parseResponseBody(response);
-    console.log(chalk.cyan(`  [←] ${originalStatus} ${response.url()}`));
-
-    // ── simultaneous replay ──
     const newUrl = swapBase(req.url, new URL(req.url).origin, newBase);
-    let newStatus: number | null  = null;
-    let newBody: unknown          = null;
+    let newStatus: number | null = null;
+    let newBody:   unknown       = null;
     let replayError: string | undefined;
 
     try {
@@ -473,93 +480,102 @@ async function run(): Promise<void> {
       newStatus = result.status;
       newBody   = result.body;
       console.log(chalk.magenta(`  [↔] ${newStatus} ${newUrl}`));
-      if (result.authFound.length > 0) {
-        console.log(chalk.gray(`       auth forwarded → ${result.authFound.join('  ')}`));
-      } else {
-        console.log(chalk.yellow(`       no auth headers detected in this request`));
+      if (result.authFound.length) {
+        console.log(chalk.gray(`  auth forwarded → ${result.authFound.join(' ')}`));
       }
     } catch (e) {
       replayError = e instanceof Error ? e.message : String(e);
       console.log(chalk.red(`  [↔] ERROR ${newUrl} — ${replayError}`));
     }
 
-    // ── compare ──
     const comparison = auditCompare(originalStatus, originalBody, newStatus, newBody, replayError);
     entries.push({ id: req.id, method: req.method, originalUrl: req.url, newUrl, comparison });
 
-    // ── live summary ──
-    const statusMark = comparison.statusMatch   ? chalk.green('✓') : chalk.red('✗');
-    const keysMark   = comparison.keysMatch      ? chalk.green('✓') : chalk.red('✗');
-    const countMark  = comparison.countMatch === null
+    // live summary line
+    const sm = comparison.statusMatch  ? chalk.green('✓') : chalk.red('✗');
+    const km = comparison.keysMatch    ? chalk.green('✓') : chalk.red('✗');
+    const cm = comparison.countMatch === null
       ? chalk.gray('—')
       : comparison.countMatch ? chalk.green('✓') : chalk.red('✗');
 
     console.log(
-      `        Status ${statusMark}  Keys ${keysMark}  Rows ${countMark}` +
-      (comparison.missingKeys.length ? chalk.red(`  missing: ${comparison.missingKeys.join(', ')}`) : '') +
-      (comparison.extraKeys.length   ? chalk.blue(`  extra: ${comparison.extraKeys.join(', ')}`)    : '') +
+      `  Status ${sm}  Keys ${km}  Rows ${cm}` +
+      (comparison.missingKeys.length ? chalk.red(`  missing: ${comparison.missingKeys.slice(0, 5).join(', ')}${comparison.missingKeys.length > 5 ? '…' : ''}`) : '') +
+      (comparison.extraKeys.length   ? chalk.blue(`  extra: ${comparison.extraKeys.slice(0, 5).join(', ')}${comparison.extraKeys.length > 5 ? '…' : ''}`)   : '') +
       (comparison.originalCount !== null ? chalk.gray(`  (${comparison.originalCount} → ${comparison.newCount})`) : ''),
     );
   });
 
   // ── navigate ──
-  // TARGET_PATH in .env is a default. If it still contains placeholder text or
-  // is the bare UI root, skip auto-navigation and let the user go there manually.
-  const hasPlaceholder = targetUrl === config.uiUrl ||
-    targetUrl === config.uiUrl + '/' ||
-    targetUrl.includes('RANDOM_KEY') ||
-    targetUrl.includes('YOUR_KEY') ||
-    targetUrl.includes('placeholder');
-
-  if (hasPlaceholder || !opts.url) {
-    console.log(chalk.blue(`\n[audit] Opening app: ${config.uiUrl}`));
-    console.log(chalk.yellow('[audit] Navigate manually to the page you want to test, then interact with it.'));
-    await page.goto(config.uiUrl, { waitUntil: 'load', timeout: 60000 });
-  } else {
-    console.log(chalk.blue(`\n[audit] Navigating to ${targetUrl}`));
+  if (!stateExists) {
+    await page.goto(config.loginUrl, { waitUntil: 'load', timeout: 60_000 });
+    // Wait until user navigates away from the login page
+    console.log(chalk.yellow('[audit] Waiting for login...'));
     try {
-      await page.goto(targetUrl, { waitUntil: 'load', timeout: 60000 });
+      await page.waitForURL(
+        (url) => !url.toString().includes(config.loginPath.replace(/^\//, '')),
+        { timeout: 300_000 },
+      );
+      // Save session once logged in
+      const state = await context.storageState();
+      fs.writeFileSync(STATE_FILE, JSON.stringify(state, null, 2));
+      console.log(chalk.green('[audit] ✓ Logged in! Session saved.'));
     } catch {
-      // 'load' timed out — page is still usable, continue
-      console.log(chalk.yellow('[audit] Page took long to load — continuing anyway. Interact with the browser.'));
+      console.log(chalk.yellow('[audit] Could not auto-detect login — continuing anyway.'));
+    }
+  } else {
+    // Restore session — navigate to app home or provided URL
+    const startUrl = opts.url ?? config.uiUrl;
+    try {
+      await page.goto(startUrl, { waitUntil: 'load', timeout: 60_000 });
+    } catch {
+      console.log(chalk.yellow('[audit] Page slow to load — continuing anyway.'));
     }
   }
 
-  console.log(chalk.yellow('\n[audit] Interact with the page (apply filters, open sections, etc.)'));
-  await waitForEnter('[audit] Press Enter when done to save the report... ');
+  console.log(chalk.blue('\n[audit] Browser is open. Navigate and interact with your app.'));
+  console.log(chalk.yellow('[audit] When done: press Ctrl+C here  OR  close the browser window.\n'));
 
-  await page.waitForTimeout(1000); // flush trailing responses
-  await browser.close();
+  // ── finish on Ctrl+C or browser close ──
+  async function finish(): Promise<void> {
+    console.log(chalk.gray('\n[audit] Stopping...'));
+    try { await page.waitForTimeout(800); } catch { /* browser may already be closed */ }
 
-  if (entries.length === 0) {
-    console.log(chalk.yellow('\n[audit] No matching API calls were captured.'));
-    console.log(chalk.yellow(`[audit] Patterns watched: ${auditApis.join(', ')}`));
+    if (entries.length === 0) {
+      console.log(chalk.yellow('[audit] No matching API calls were captured.'));
+      console.log(chalk.yellow(`[audit] Patterns watched: ${auditApis.join(', ')}`));
+      process.exit(0);
+    }
+
+    const deduped = deduplicateByPath(entries);
+    console.log(chalk.gray(
+      `[audit] ${entries.length} call(s) → ${deduped.length} unique endpoint(s) after deduplication`,
+    ));
+
+    fs.writeFileSync(REPORT_JSON, JSON.stringify(entries, null, 2));
+    fs.writeFileSync(REPORT_HTML, renderHtml(deduped, config.uiUrl, newBase, auditApis));
+    writeCallsLog(deduped, newBase, auditApis);
+
+    const passCount = deduped.filter(isPassed).length;
+    console.log(`\n${chalk.green('[audit] Done!')}`);
+    console.log(`  ${chalk.cyan('HTML report :')} ${REPORT_HTML}`);
+    console.log(`  ${chalk.cyan('JSON report :')} ${REPORT_JSON}`);
+    console.log(`  ${chalk.cyan('Calls log   :')} ${CALLS_TXT}`);
+    console.log(`  ${chalk.green('Pass:')} ${passCount}  ${chalk.red('Fail:')} ${deduped.length - passCount}  Total: ${deduped.length}`);
     process.exit(0);
   }
 
-  // Deduplicate: same endpoint path called multiple times (e.g. pagination
-  // page=1, page=2, page=3...) → keep only the FIRST occurrence per path.
-  // All calls are still saved to the raw JSON; only the report is deduplicated.
-  const dedupedEntries = deduplicateByPath(entries);
+  // Browser closed by user
+  browser.on('disconnected', () => { finish(); });
 
-  console.log(chalk.gray(
-    `\n[audit] ${entries.length} total call(s) captured → ` +
-    `${dedupedEntries.length} unique endpoint(s) after deduplication`
-  ));
+  // Ctrl+C
+  process.on('SIGINT', async () => {
+    try { await browser.close(); } catch { /* already closed */ }
+    await finish();
+  });
 
-  fs.writeFileSync(REPORT_JSON, JSON.stringify(entries, null, 2));
-  fs.writeFileSync(REPORT_HTML, renderHtml(dedupedEntries, config.appBaseUrl, newBase, auditApis));
-  writeCallsLog(dedupedEntries, newBase, auditApis);
-
-  const pass = entries.filter(
-    (e) => e.comparison.statusMatch && e.comparison.keysMatch && e.comparison.countMatch !== false
-  ).length;
-
-  console.log(`\n${chalk.green('[audit] Done!')}`);
-  console.log(`  ${chalk.cyan('HTML report:')}  ${REPORT_HTML}`);
-  console.log(`  ${chalk.cyan('JSON report:')}  ${REPORT_JSON}`);
-  console.log(`  ${chalk.cyan('Calls log:')}    ${CALLS_TXT}`);
-  console.log(`  ${chalk.green('Pass:')} ${pass}  ${chalk.red('Fail:')} ${entries.length - pass}  Total: ${entries.length}`);
+  // Keep process alive while browser is open
+  await new Promise<void>((resolve) => browser.on('disconnected', resolve));
 }
 
 run().catch((err) => {
