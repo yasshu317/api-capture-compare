@@ -3,5 +3,9 @@ dist/
 .env
 browser-state.json
 api-collection.json
+audit-report.json
+audit-report.html
+api-calls-log.json
+api-calls-log.txt
 diff-report.json
 diff-report.html

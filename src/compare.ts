@@ -183,7 +183,7 @@ async function run(): Promise<void> {
 
   const opts = program.opts<{ newBase?: string; collection: string }>();
 
-  const newBase = opts.newBase ?? config.newBaseUrl;
+  const newBase = opts.newBase ?? config.newApiBase ?? config.newBaseUrl;
   if (!newBase) {
     console.error(chalk.red('[compare] No new base URL provided.'));
     console.error(chalk.yellow('[compare] Either pass --newBase <url> or set NEW_BASE_URL in .env'));
