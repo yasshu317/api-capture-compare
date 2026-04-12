@@ -13,6 +13,7 @@ export interface AuditComparison {
 
   originalCount: number | null;
   newCount:      number | null;
+  countBasis:    string | null;  // what was counted, e.g. '"total" field', 'object key count'
   countMatch:    boolean | null;
 
   error?: string;
@@ -62,24 +63,50 @@ function uniqueSorted(arr: string[]): string[] {
   return [...new Set(arr)].sort();
 }
 
-// ─── row counting ─────────────────────────────────────────────────────────────
+// ─── row / size counting ──────────────────────────────────────────────────────
+//
+// Priority order:
+//   1. Explicit numeric count field   (total, count, totalCount, …)
+//   2. Known array container field    (data, items, results, …)  → array length
+//   3. Top-level array                → array length
+//   4. Top-level object               → number of keys  (always gives something to compare)
+//   5. Anything else                  → null
+//
+// The "basis" string is returned alongside the number so the report can say
+// e.g. "6 keys (object size)" vs "12 records (items array)".
+
+export interface CountResult {
+  value: number;
+  basis: string; // human-readable explanation of what was counted
+}
 
 const ROW_FIELDS   = ['data', 'items', 'results', 'rows', 'list', 'content', 'records', 'payload', 'entries'];
-const COUNT_FIELDS = ['total', 'count', 'totalCount', 'totalRows', 'recordCount', 'size'];
+const COUNT_FIELDS = ['total', 'count', 'totalCount', 'totalRows', 'recordCount', 'size', 'totalResults', 'total_count'];
 
-function countRows(body: unknown): number | null {
+function countRows(body: unknown): CountResult | null {
   if (body === null || body === undefined) return null;
-  if (Array.isArray(body)) return body.length;
+
+  // 1. Top-level array
+  if (Array.isArray(body)) return { value: body.length, basis: 'top-level array' };
 
   if (typeof body === 'object') {
     const rec = body as Record<string, unknown>;
+
+    // 2. Explicit numeric count field
     for (const k of COUNT_FIELDS) {
-      if (typeof rec[k] === 'number') return rec[k] as number;
+      if (typeof rec[k] === 'number') return { value: rec[k] as number, basis: `"${k}" field` };
     }
+
+    // 3. Known array container
     for (const k of ROW_FIELDS) {
-      if (Array.isArray(rec[k])) return (rec[k] as unknown[]).length;
+      if (Array.isArray(rec[k])) return { value: (rec[k] as unknown[]).length, basis: `"${k}" array` };
     }
+
+    // 4. Fall back to key count — always gives a number to compare
+    const keyCount = Object.keys(rec).length;
+    return { value: keyCount, basis: 'object key count' };
   }
+
   return null;
 }
 
@@ -101,8 +128,13 @@ export function auditCompare(
   const missingKeys = originalKeys.filter((k) => !newSet.has(k));
   const extraKeys   = newKeys.filter((k) => !origSet.has(k));
 
-  const originalCount = countRows(originalBody);
-  const newCount      = countRows(newBody);
+  const origCount = countRows(originalBody);
+  const nwCount   = countRows(newBody);
+
+  const originalCount = origCount?.value ?? null;
+  const newCount      = nwCount?.value   ?? null;
+  // Use whichever basis description is available (prefer original)
+  const countBasis    = origCount?.basis ?? nwCount?.basis ?? null;
   const countMatch    = (originalCount !== null && newCount !== null)
     ? originalCount === newCount
     : null;
@@ -118,6 +150,7 @@ export function auditCompare(
     keysMatch: missingKeys.length === 0 && extraKeys.length === 0,
     originalCount,
     newCount,
+    countBasis,
     countMatch,
     error,
   };

@@ -136,8 +136,10 @@ function issueList(c: AuditComparison): string[] {
   const issues: string[] = [];
   if (!c.statusMatch)
     issues.push(`Status changed: old system returned <strong>${c.originalStatus}</strong>, new system returned <strong>${c.newStatus}</strong>`);
-  if (c.countMatch === false)
-    issues.push(`Record count changed: old system returned <strong>${c.originalCount}</strong> records, new system returned <strong>${c.newCount}</strong>`);
+  if (c.countMatch === false) {
+    const basis = c.countBasis ? ` (counted via ${c.countBasis})` : '';
+    issues.push(`Count mismatch${basis}: old system returned <strong>${c.originalCount}</strong>, new system returned <strong>${c.newCount}</strong>`);
+  }
   if (c.missingKeys.length)
     issues.push(`New system is <strong>missing</strong> these fields: <code>${c.missingKeys.join(', ')}</code>`);
   if (c.extraKeys.length)
@@ -183,14 +185,17 @@ function renderHtml(
         ? `<span class="badge badge-ok">✓ Match</span>`
         : '';
 
+    const basisNote = c.countBasis ? `<div class="count-basis">Counted via: ${c.countBasis}</div>` : '';
+
     const recordLine = (c.originalCount !== null || c.newCount !== null)
       ? `<div class="record-row">
-           <div class="record-box"><div class="record-label">Old Records</div><div class="record-num">${c.originalCount ?? '—'}</div></div>
+           <div class="record-box"><div class="record-label">Old</div><div class="record-num">${c.originalCount ?? '—'}</div></div>
            <div class="record-arrow">→</div>
-           <div class="record-box"><div class="record-label">New Records</div><div class="record-num">${c.newCount ?? '—'}</div></div>
+           <div class="record-box"><div class="record-label">New</div><div class="record-num">${c.newCount ?? '—'}</div></div>
            ${countBadge}
-         </div>`
-      : `<p class="dim">No record count available</p>`;
+         </div>
+         ${basisNote}`
+      : `<p class="dim">No count available</p>`;
 
     const keySection = (label: string, keys: string[], cls: string) =>
       keys.length === 0 ? '' :
@@ -287,6 +292,7 @@ h1{font-size:24px;color:#1a237e;margin-bottom:4px}
 .record-label{font-size:11px;color:#888}
 .record-num{font-size:24px;font-weight:700;color:#1a237e}
 .record-arrow{font-size:20px;color:#aaa}
+.count-basis{font-size:11px;color:#aaa;margin-top:4px;font-style:italic}
 
 /* issues */
 .issues{background:#fff8e1;border-radius:8px;padding:14px 16px}
@@ -382,7 +388,8 @@ function writeCallsLog(entries: AuditEntry[], newBase: string, patterns: string[
     lines.push('');
     if (c.originalCount !== null || c.newCount !== null) {
       const countState = c.countMatch === false ? '⚠ MISMATCH' : c.countMatch === true ? '✓ Match' : '';
-      lines.push(`  Records: ${c.originalCount ?? '—'} (old) → ${c.newCount ?? '—'} (new) ${countState}`);
+      const basis = c.countBasis ? ` [via ${c.countBasis}]` : '';
+      lines.push(`  Count${basis}: ${c.originalCount ?? '—'} (old) → ${c.newCount ?? '—'} (new) ${countState}`);
     }
     if (c.missingKeys.length) lines.push(`  Missing fields in new: ${c.missingKeys.join(', ')}`);
     if (c.extraKeys.length)   lines.push(`  Extra fields in new:   ${c.extraKeys.join(', ')}`);
@@ -502,7 +509,7 @@ async function run(): Promise<void> {
       `  Status ${sm}  Keys ${km}  Rows ${cm}` +
       (comparison.missingKeys.length ? chalk.red(`  missing: ${comparison.missingKeys.slice(0, 5).join(', ')}${comparison.missingKeys.length > 5 ? '…' : ''}`) : '') +
       (comparison.extraKeys.length   ? chalk.blue(`  extra: ${comparison.extraKeys.slice(0, 5).join(', ')}${comparison.extraKeys.length > 5 ? '…' : ''}`)   : '') +
-      (comparison.originalCount !== null ? chalk.gray(`  (${comparison.originalCount} → ${comparison.newCount})`) : ''),
+      (comparison.originalCount !== null ? chalk.gray(`  (${comparison.originalCount} → ${comparison.newCount} via ${comparison.countBasis})`) : ''),
     );
   });
 
