@@ -1,47 +1,59 @@
 # API Capture & Compare
 
-A two-phase CLI tool built with **Node.js + TypeScript + Playwright** that:
+A single-command tool built with **Node.js + TypeScript + Playwright** that:
 
-1. **Captures** all API/XHR/fetch calls made by a web page while you interact with it
-2. **Compares** those captured calls against a different base URL (e.g. staging, local dev) and produces a visual diff report
+1. Opens your app in a browser at the login page (fresh every run)
+2. Auto-detects when you log in and continues automatically
+3. Watches for specific API calls as you navigate
+4. Simultaneously replays each call against your new API server
+5. Compares response structure (nested keys) and record counts
+6. Generates a QA-friendly HTML report — press Enter and it's done
 
-No backend required. Works with any web application regardless of framework.
+No backend required. Works with any web application.
 
 ---
 
 ## How it works
 
 ```
-Phase 1 — Capture                         Phase 2 — Compare
-─────────────────────────────────          ─────────────────────────────────
-npm run capture                            npm run compare -- --newBase <url>
-       │                                          │
-       ▼                                          ▼
-Opens Chrome (headed)                   Reads api-collection.json
-       │                                          │
-       ▼                                          ▼
-You log in + interact               Replays each request against new base URL
-(e.g. click FILTER)                               │
-       │                                          ▼
-       ▼                                  Deep-diffs responses
-Saves api-collection.json                         │
-                                                  ▼
-                                    diff-report.html + diff-report.json
+npm run audit
+      │
+      ▼
+Browser opens → login page  (fresh every run)
+      │
+      ▼  (auto-detected — no manual step needed)
+You log in → tool continues automatically
+      │
+      ▼
+Navigate your app — tool captures matching API calls
+For each call → instantly replays against NEW_API_BASE
+                compares nested keys + record counts
+      │
+      ▼
+Press Enter in terminal
+      │
+      ├─→  audit-report.html       (open in browser — QA-friendly)
+      ├─→  audit-report.json       (machine-readable full data)
+      ├─→  api-calls-log.txt       (human-readable log)
+      └─→  audit-runs/<timestamp>/ (previous run archived here)
+               └─ responses/
+                    ├─ 001_GET_api_v1_offices.json
+                    └─ 002_GET_api_v1_tasks.json
 ```
 
 ---
 
 ## Prerequisites
 
-- **Node.js** >= 18
-- **npm** >= 9
+- Node.js >= 18
+- npm >= 9
 
 ---
 
 ## Installation
 
 ```bash
-git clone <your-repo-url>
+git clone https://github.com/yasshu317/api-capture-compare.git
 cd api-capture-compare
 npm install
 npx playwright install chromium
@@ -58,106 +70,114 @@ cp .env.example .env
 ```
 
 ```env
-# Base URL of the app you want to capture from
-APP_BASE_URL=https://your-app.com
-
-# Page to navigate to after login
-TARGET_PATH=/your/target/page
-
-# Login page path
+# The web app you log into (browser UI)
+UI_URL=https://your-app.example.com
 LOGIN_PATH=/login
+TARGET_PATH=        # leave blank to navigate manually after login
 
-# (Optional) Set this if you always compare against the same URL
-# NEW_BASE_URL=https://staging.your-app.com
+# New API server to test against
+NEW_API_BASE=https://your-new-api.example.com
+
+# Which APIs to capture (comma-separated path fragments)
+AUDIT_APIS=api/v1/patients,api/v1/offices,api/v1/tasks
 ```
 
-> `.env` is gitignored — your URLs and credentials never get committed.
+`.env` is gitignored — your URLs and credentials are never committed.
 
 ---
 
 ## Usage
 
-### Phase 1 — Capture
+### Run the audit
 
 ```bash
-npm run capture
+npm run audit
 ```
 
-**What happens step by step:**
+**Step by step:**
 
-| Step | What you see / do |
-|------|-------------------|
-| 1 | Chrome opens in headed (visible) mode |
-| 2 | **First run only**: login page opens — log in manually |
-| 3 | Press **Enter** in the terminal — session is saved to `browser-state.json` |
-| 4 | Browser navigates to your `TARGET_PATH` |
-| 5 | API calls are printed in the terminal as they fire |
-| 6 | Interact with the page (click buttons, apply filters, etc.) |
-| 7 | Press **Enter** in the terminal when done |
-| 8 | `api-collection.json` is saved with all captured requests + responses |
+| Step | What happens |
+|---|---|
+| 1 | Terminal shows config, browser opens on the login page |
+| 2 | Log in manually — tool auto-detects and continues |
+| 3 | Navigate to the pages you want to test |
+| 4 | API calls matching `AUDIT_APIS` appear in the terminal as they fire |
+| 5 | Each call is instantly replayed against `NEW_API_BASE` |
+| 6 | Come back to the terminal and **press Enter** |
+| 7 | Report generated — open `audit-report.html` in your browser |
 
-> On subsequent runs, the saved session is reused automatically — no need to log in again.
-
----
-
-### Phase 2 — Compare
+**Pass a dynamic URL at runtime:**
 
 ```bash
-# Pass the new base URL via flag
-npm run compare -- --newBase https://staging.your-app.com
-
-# Or set NEW_BASE_URL in .env and just run
-npm run compare
+npm run audit -- --url "https://your-app.example.com/page?APP_KEY=abc123"
 ```
 
-**Options:**
-
-| Flag | Description | Default |
-|------|-------------|---------|
-| `--newBase` | New base URL to replay requests against | `NEW_BASE_URL` from `.env` |
-| `--collection` | Path to a custom collection file | `api-collection.json` |
-
-**Examples:**
+**Override which APIs to watch:**
 
 ```bash
-# Local dev server
-npm run compare -- --newBase http://localhost:3000
-
-# Staging environment
-npm run compare -- --newBase https://staging.your-app.com
-
-# Custom collection file
-npm run compare -- --newBase https://staging.your-app.com --collection ./my-collection.json
-```
-
-After it runs, open the HTML report in your browser:
-
-```bash
-open diff-report.html
+npm run audit -- --apis "api/v1/payments,api/v1/employees"
 ```
 
 ---
 
-## Output
+## Output files
 
-| File | Description | Committed? |
-|------|-------------|------------|
-| `api-collection.json` | Captured requests + responses from Phase 1 | No |
-| `browser-state.json` | Saved login session (cookies + localStorage) | No |
-| `diff-report.json` | Full diff results — machine readable | No |
-| `diff-report.html` | Visual diff report — open in browser | No |
+| File | Description | Kept in git? |
+|---|---|---|
+| `audit-report.html` | QA-friendly visual report — open in browser | No |
+| `audit-report.json` | Full raw data for all captured calls | No |
+| `api-calls-log.txt` | Human-readable log of legacy vs new URLs | No |
+| `api-calls-log.json` | Machine-readable calls log | No |
+| `audit-runs/<timestamp>/` | **Previous run archive** — auto-created each run | No |
+| `audit-runs/<timestamp>/responses/` | Individual response JSON per endpoint | No |
 
-### HTML Report columns
+### Run archive
 
-| Column | Description |
-|--------|-------------|
-| # | Request ID |
-| Method | HTTP method (GET, POST, etc.) |
-| Original URL | URL from the captured collection |
-| New URL | Replayed URL with the new base |
-| Status | Original status → New status |
-| Diff | `identical` or `N change(s)` |
-| Details | Expandable view of added / deleted / edited fields |
+Every time you run the audit, the **previous** output files are automatically moved to:
+
+```
+audit-runs/
+  2026-04-12_14-30-00/
+    audit-report.html
+    audit-report.json
+    api-calls-log.txt
+    api-calls-log.json
+    responses/
+      001_GET_api_v1_offices.json
+      002_GET_api_v1_tasks.json
+```
+
+Each response file contains the full original and new response bodies side by side — useful for manual inspection or debugging.
+
+---
+
+## What gets compared
+
+### Nested key comparison
+Every dot-path key in the JSON response is extracted recursively (up to 10 levels deep):
+
+```
+data
+data.items
+data.items.id
+data.items.name
+data.items.address
+data.items.address.city    ← nested keys detected automatically
+meta.pagination.total
+```
+
+Missing keys (in old but not in new) are shown in **red**.  
+Extra keys (in new but not in old) are shown in **blue**.
+
+### Record count comparison
+Priority order — always finds something to compare:
+
+| Priority | Example | What is counted |
+|---|---|---|
+| 1 | `{ "total": 42 }` | `"total"` field |
+| 2 | `{ "data": [...] }` | `"data"` array length |
+| 3 | `[...5 items]` | Top-level array length |
+| 4 | `{ "id": 1, "name": "..." }` | Number of top-level keys |
 
 ---
 
@@ -166,15 +186,16 @@ open diff-report.html
 ```
 api-capture-compare/
 ├── src/
-│   ├── capture.ts        # Phase 1: Playwright interception + session management
-│   ├── compare.ts        # Phase 2: request replay + diff report generation
-│   ├── config.ts         # Loads .env, exposes typed config object
+│   ├── audit.ts              # Main audit command
+│   ├── config.ts             # .env loader
 │   └── utils/
-│       └── diff.ts       # Deep-diff helper (wraps deep-diff library)
-├── .env.example          # Config template — copy to .env and fill in
+│       └── audit-diff.ts     # Nested key + count comparison
+├── audit-runs/               # Auto-created — archived runs (gitignored)
+├── .env.example              # Config template
 ├── .gitignore
 ├── package.json
 ├── tsconfig.json
+├── QA-GUIDE.html             # Non-technical guide for QA testers
 └── README.md
 ```
 
@@ -183,9 +204,8 @@ api-capture-compare/
 ## Tech stack
 
 | Library | Purpose |
-|---------|---------|
-| [Playwright](https://playwright.dev) | Browser automation + network interception |
-| [deep-diff](https://github.com/flitbit/diff) | Recursive JSON comparison |
+|---|---|
+| [Playwright](https://playwright.dev/) | Browser automation + network interception |
 | [commander](https://github.com/tj/commander.js) | CLI argument parsing |
 | [chalk](https://github.com/chalk/chalk) | Colored terminal output |
 | [dotenv](https://github.com/motdotla/dotenv) | `.env` file loading |
@@ -195,23 +215,20 @@ api-capture-compare/
 
 ## FAQ
 
-**Q: Do I need to log in every time?**
-No. After the first run, your session is saved to `browser-state.json` and reused automatically.
+**Do I need to log in every time?**  
+Yes — the tool starts fresh on every run so there is no stale session to worry about. The login page always opens and the tool auto-detects when you are logged in.
 
-**Q: How do I reset the session?**
-Delete `browser-state.json` and run `npm run capture` again.
+**My URL has a dynamic key (e.g. `?APP_KEY=abc`). How do I handle that?**  
+Leave `TARGET_PATH` blank in `.env` and pass the full URL at runtime:
+```bash
+npm run audit -- --url "https://your-app.com/page?APP_KEY=abc123"
+```
 
-**Q: Can I capture calls from multiple pages?**
-Yes — after the browser opens, navigate to as many pages as you like before pressing Enter.
+**Will pagination calls create duplicate entries in the report?**  
+No. Calls to the same endpoint path (e.g. `/api/patients`) are deduplicated — only the first call per unique path appears in the report. All calls are still saved to `audit-report.json`.
 
-**Q: What request types are captured?**
-All XHR and fetch calls. Static assets (JS, CSS, images, fonts) are automatically filtered out.
+**Where do I find previous run data?**  
+In `audit-runs/<timestamp>/` — a new folder is created each time you run the audit.
 
-**Q: Can I compare without re-capturing?**
-Yes — `api-collection.json` persists between runs. You can run Phase 2 multiple times against different base URLs using the same collection.
-
----
-
-## License
-
-MIT
+**Are there any leftover files after a run?**  
+No. The only files written are the report files (`audit-report.html`, `api-calls-log.txt`, etc.) and the archived run in `audit-runs/`. No session file, no temp files.
