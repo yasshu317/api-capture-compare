@@ -1,22 +1,17 @@
 {
   "name": "api-capture-compare",
   "version": "1.0.0",
-  "description": "Capture API calls via Playwright and compare responses across base URLs",
+  "description": "One-command API auditor — intercept, replay, compare nested structure",
   "scripts": {
-    "capture": "ts-node src/capture.ts",
-    "compare": "ts-node src/compare.ts",
-    "audit":   "ts-node src/audit.ts"
+    "audit": "ts-node src/audit.ts"
   },
   "dependencies": {
     "chalk": "^4.1.2",
     "commander": "^12.1.0",
-    "deep-diff": "^1.0.2",
     "dotenv": "^17.3.1",
     "playwright": "^1.42.1"
   },
   "devDependencies": {
-    "@types/deep-diff": "^1.0.5",
-    "@types/dotenv": "^6.1.1",
     "@types/node": "^20.12.7",
     "ts-node": "^10.9.2",
     "typescript": "^5.4.5"
