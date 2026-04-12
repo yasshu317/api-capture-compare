@@ -7,8 +7,8 @@
  *   npm run audit -- --apis "api/v1/payments,api/v1/users" --newBase "https://new.example.com"
  *
  * Flow:
- *   1. Browser opens → login page  (saved session = skips login entirely)
- *   2. Log in → auto-detected, session saved
+ *   1. Browser opens → login page  (fresh every run, no stale session)
+ *   2. Log in → auto-detected, tool continues automatically
  *   3. Navigate to any pages and interact with the app
  *   4. Press Enter in this terminal when done
  *   5. Report + response files generated; previous run archived automatically
