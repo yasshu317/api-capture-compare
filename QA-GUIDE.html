@@ -117,12 +117,12 @@ footer{text-align:center;margin-top:32px;font-size:12px;color:#bbb}
     <div class="step">
       <div class="step-num">3</div>
       <div class="step-body">
-        <div class="step-title">Log in to the app (first time only)</div>
+        <div class="step-title">Log in to the app</div>
         <div class="step-desc">
           The browser opens on the login page. Log in as you normally would.
-          The tool detects when you are logged in — you do not need to do anything in the terminal.
+          The tool automatically detects when you are logged in and continues — you do not need to do anything in the terminal.
         </div>
-        <div class="step-tip">✓ After the first run your session is saved. On the next run the browser opens directly on the app — no login needed.</div>
+        <div class="step-tip">✓ The tool starts fresh every run — login page always appears so there is never a stale session to worry about.</div>
       </div>
     </div>
 
@@ -303,8 +303,8 @@ audit-runs/<br>
       <td>Run <code>npx playwright install chromium</code> and try again</td>
     </tr>
     <tr>
-      <td>Login page keeps showing on every run</td>
-      <td>Delete <code>browser-state.json</code> and log in again</td>
+      <td>Login page appears on every run</td>
+      <td>This is expected — the tool always starts with a fresh login so there is never a stale session</td>
     </tr>
     <tr>
       <td>My page URL has a code like <code>?APP_KEY=abc123</code></td>
@@ -327,15 +327,15 @@ audit-runs/<br>
   <div class="qr-grid">
     <div class="qr-card">
       <h3>Standard run</h3>
-      <p><code>npm run audit</code><br><br>Opens browser, uses session if saved.</p>
+      <p><code>npm run audit</code><br><br>Opens browser on login page — fresh every run, nothing to clean up.</p>
     </div>
     <div class="qr-card">
       <h3>Dynamic URL</h3>
       <p><code>npm run audit -- --url "https://..."</code><br><br>Use when URL has a dynamic key.</p>
     </div>
     <div class="qr-card">
-      <h3>Reset session</h3>
-      <p>Delete <code>browser-state.json</code> and run again — login page will appear.</p>
+      <h3>No cleanup needed</h3>
+      <p>Every run starts fresh automatically — no session files, no manual cleanup required.</p>
     </div>
     <div class="qr-card">
       <h3>Find old reports</h3>

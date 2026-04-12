@@ -2,8 +2,8 @@
 
 A single-command tool built with **Node.js + TypeScript + Playwright** that:
 
-1. Opens your app in a browser
-2. Auto-detects when you log in (saves your session)
+1. Opens your app in a browser at the login page (fresh every run)
+2. Auto-detects when you log in and continues automatically
 3. Watches for specific API calls as you navigate
 4. Simultaneously replays each call against your new API server
 5. Compares response structure (nested keys) and record counts
@@ -19,10 +19,10 @@ No backend required. Works with any web application.
 npm run audit
       │
       ▼
-Browser opens → login page
+Browser opens → login page  (fresh every run)
       │
-      ▼  (auto-detected — no manual step)
-You log in → session saved
+      ▼  (auto-detected — no manual step needed)
+You log in → tool continues automatically
       │
       ▼
 Navigate your app — tool captures matching API calls
@@ -98,20 +98,13 @@ npm run audit
 
 | Step | What happens |
 |---|---|
-| 1 | Terminal shows config, browser opens |
-| 2 | **First run:** login page appears — log in manually |
-| 3 | Tool auto-detects login, saves session for next time |
-| 4 | Navigate to the pages you want to test |
-| 5 | API calls matching `AUDIT_APIS` appear in the terminal as they fire |
-| 6 | Each call is instantly replayed against `NEW_API_BASE` |
-| 7 | Come back to the terminal and **press Enter** |
-| 8 | Report generated — open `audit-report.html` in your browser |
-
-**Subsequent runs** (session already saved):
-
-```
-npm run audit  →  browser opens directly on your app, no login needed
-```
+| 1 | Terminal shows config, browser opens on the login page |
+| 2 | Log in manually — tool auto-detects and continues |
+| 3 | Navigate to the pages you want to test |
+| 4 | API calls matching `AUDIT_APIS` appear in the terminal as they fire |
+| 5 | Each call is instantly replayed against `NEW_API_BASE` |
+| 6 | Come back to the terminal and **press Enter** |
+| 7 | Report generated — open `audit-report.html` in your browser |
 
 **Pass a dynamic URL at runtime:**
 
@@ -137,7 +130,6 @@ npm run audit -- --apis "api/v1/payments,api/v1/employees"
 | `api-calls-log.json` | Machine-readable calls log | No |
 | `audit-runs/<timestamp>/` | **Previous run archive** — auto-created each run | No |
 | `audit-runs/<timestamp>/responses/` | Individual response JSON per endpoint | No |
-| `browser-state.json` | Saved login session (reused on next run) | No |
 
 ### Run archive
 
@@ -195,12 +187,9 @@ Priority order — always finds something to compare:
 api-capture-compare/
 ├── src/
 │   ├── audit.ts              # Main audit command
-│   ├── capture.ts            # Legacy capture command
-│   ├── compare.ts            # Legacy compare command
 │   ├── config.ts             # .env loader
 │   └── utils/
-│       ├── audit-diff.ts     # Nested key + count comparison
-│       └── diff.ts           # Deep diff (used by compare.ts)
+│       └── audit-diff.ts     # Nested key + count comparison
 ├── audit-runs/               # Auto-created — archived runs (gitignored)
 ├── .env.example              # Config template
 ├── .gitignore
@@ -227,10 +216,7 @@ api-capture-compare/
 ## FAQ
 
 **Do I need to log in every time?**  
-No. After the first run your session is saved to `browser-state.json` and reused automatically.
-
-**How do I reset the session?**  
-Delete `browser-state.json` and run `npm run audit` again.
+Yes — the tool starts fresh on every run so there is no stale session to worry about. The login page always opens and the tool auto-detects when you are logged in.
 
 **My URL has a dynamic key (e.g. `?APP_KEY=abc`). How do I handle that?**  
 Leave `TARGET_PATH` blank in `.env` and pass the full URL at runtime:
@@ -244,5 +230,5 @@ No. Calls to the same endpoint path (e.g. `/api/patients`) are deduplicated — 
 **Where do I find previous run data?**  
 In `audit-runs/<timestamp>/` — a new folder is created each time you run the audit.
 
-**Can I compare without re-capturing?**  
-Use the legacy `npm run compare` command with a saved `api-collection.json`.
+**Are there any leftover files after a run?**  
+No. The only files written are the report files (`audit-report.html`, `api-calls-log.txt`, etc.) and the archived run in `audit-runs/`. No session file, no temp files.
