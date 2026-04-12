@@ -1,7 +1,6 @@
 node_modules/
 dist/
 .env
-browser-state.json
 audit-report.json
 audit-report.html
 api-calls-log.json

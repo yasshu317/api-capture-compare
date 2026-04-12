@@ -461,19 +461,17 @@ async function run(): Promise<void> {
   console.log(`  Watching     : ${auditApis.join(' | ')}`);
   console.log(chalk.blue('[audit] ───────────────────────────────────────────────\n'));
 
-  // ── browser ──
-  const browser     = await chromium.launch({ headless: false });
-  const stateExists = fs.existsSync(STATE_FILE);
-  let   context: BrowserContext;
-
-  if (stateExists) {
-    console.log(chalk.gray('[audit] Loading saved session (no login needed)...'));
-    context = await browser.newContext({ storageState: STATE_FILE });
-  } else {
-    console.log(chalk.yellow('[audit] No saved session — browser will open the login page.'));
-    console.log(chalk.yellow('[audit] Log in and the tool will continue automatically.\n'));
-    context = await browser.newContext();
+  // ── clean up any previous session so every run starts fresh ──
+  if (fs.existsSync(STATE_FILE)) {
+    fs.unlinkSync(STATE_FILE);
+    console.log(chalk.gray('[audit] Previous session cleared — starting fresh.'));
   }
+
+  // ── browser ──
+  const browser = await chromium.launch({ headless: false });
+  console.log(chalk.yellow('[audit] Browser will open the login page.'));
+  console.log(chalk.yellow('[audit] Log in and the tool will continue automatically.\n'));
+  const context: BrowserContext = await browser.newContext();
 
   const page = await context.newPage();
 
@@ -550,28 +548,17 @@ async function run(): Promise<void> {
     );
   });
 
-  // ── navigate ──
-  if (!stateExists) {
-    await page.goto(config.loginUrl, { waitUntil: 'load', timeout: 60_000 });
-    console.log(chalk.yellow('[audit] Waiting for you to log in...'));
-    try {
-      await page.waitForURL(
-        (url) => !url.toString().includes(config.loginPath.replace(/^\//, '')),
-        { timeout: 300_000 },
-      );
-      const state = await context.storageState();
-      fs.writeFileSync(STATE_FILE, JSON.stringify(state, null, 2));
-      console.log(chalk.green('[audit] ✓ Logged in! Session saved for next run.'));
-    } catch {
-      console.log(chalk.yellow('[audit] Could not auto-detect login — continuing anyway.'));
-    }
-  } else {
-    const startUrl = opts.url ?? config.uiUrl;
-    try {
-      await page.goto(startUrl, { waitUntil: 'load', timeout: 60_000 });
-    } catch {
-      console.log(chalk.yellow('[audit] Page slow to load — continuing.'));
-    }
+  // ── navigate — always start at login ──
+  await page.goto(config.loginUrl, { waitUntil: 'load', timeout: 60_000 });
+  console.log(chalk.yellow('[audit] Waiting for you to log in...'));
+  try {
+    await page.waitForURL(
+      (url) => !url.toString().includes(config.loginPath.replace(/^\//, '')),
+      { timeout: 300_000 },
+    );
+    console.log(chalk.green('[audit] ✓ Logged in! Navigate to the pages you want to test.'));
+  } catch {
+    console.log(chalk.yellow('[audit] Could not auto-detect login — continuing anyway.'));
   }
 
   console.log(chalk.blue('\n[audit] ✅ Browser is ready.'));
@@ -606,6 +593,9 @@ async function run(): Promise<void> {
   fs.writeFileSync(REPORT_JSON, JSON.stringify(rawEntries, null, 2));
   fs.writeFileSync(REPORT_HTML, renderHtml(deduped, config.uiUrl, newBase, auditApis, archiveDir));
   writeCallsLog(deduped, newBase, auditApis);
+
+  // ── clean up session file — no leftover files after run ──
+  if (fs.existsSync(STATE_FILE)) fs.unlinkSync(STATE_FILE);
 
   const passCount = deduped.filter(isPassed).length;
   console.log(`\n${chalk.green('[audit] ✅ Done!')}`);
