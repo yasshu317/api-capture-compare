@@ -125,7 +125,7 @@ npm run audit -- --apis "api/v1/payments,api/v1/employees"
 | File | Description | Kept in git? |
 |---|---|---|
 | `audit-report.html` | QA-friendly visual report — open in browser | No |
-| `audit-report.json` | Full raw data for all captured calls | No |
+| `audit-report.json` | `{ summary, captures[] }` — rollup counts + every captured call | No |
 | `api-calls-log.txt` | Human-readable log of legacy vs new URLs | No |
 | `api-calls-log.json` | Machine-readable calls log | No |
 | `audit-runs/<timestamp>/` | **Previous run archive** — auto-created each run | No |
@@ -225,7 +225,7 @@ npm run audit -- --url "https://your-app.com/page?APP_KEY=abc123"
 ```
 
 **Will pagination calls create duplicate entries in the report?**  
-No. Calls to the same endpoint path (e.g. `/api/patients`) are deduplicated — only the first call per unique path appears in the report. All calls are still saved to `audit-report.json`.
+Same path + method is rolled into one **card** (legacy-vs-new comparison uses the **first** capture). The HTML report and logs show **how many times** that endpoint was captured, plus **total HTTP captures** for the session. `audit-report.json` lists every capture under `captures` and includes `summary.endpointRollup` with counts.
 
 **Where do I find previous run data?**  
 In `audit-runs/<timestamp>/` — a new folder is created each time you run the audit.

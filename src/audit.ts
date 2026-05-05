@@ -45,16 +45,20 @@ interface RawEntry {
   comparison:   AuditComparison;
 }
 
-// Entry used in reports (no raw bodies — kept only in archive)
-type AuditEntry = Omit<RawEntry, 'originalBody' | 'newBody'>;
+/** First capture per endpoint drives legacy-vs-new comparison; captures thereafter increment counts only. */
+interface AggregatedAuditRow extends RawEntry {
+  captureCount: number;
+  captureIds:   number[];
+}
 
 // ─── archive ──────────────────────────────────────────────────────────────────
 
 /**
  * Move existing output files into audit-runs/<timestamp>/ before each run.
+ * Reports are never deleted — only relocated so history stays under audit-runs/.
  * Saves individual response JSON files into audit-runs/<timestamp>/responses/.
  */
-function archivePreviousRun(rawEntries: RawEntry[]): string | null {
+function archivePreviousRun(rawEntries: AggregatedAuditRow[]): string | null {
   const outputFiles = [REPORT_HTML, REPORT_JSON, CALLS_JSON, CALLS_TXT];
   const hasExisting = outputFiles.some((f) => fs.existsSync(f));
   if (!hasExisting && rawEntries.length === 0) return null;
@@ -97,7 +101,9 @@ function archivePreviousRun(rawEntries: RawEntry[]): string | null {
           status: e.comparison.newStatus,
           body:   e.newBody,
         },
-        result: isPassed(e) ? 'PASS' : 'FAIL',
+        result:      isPassed(e) ? 'PASS' : 'FAIL',
+        captureCount: e.captureCount,
+        captureIds:   e.captureIds,
       }, null, 2),
     );
   }
@@ -175,13 +181,23 @@ function endpointKey(url: string): string {
   try { return new URL(url).pathname; } catch { return url; }
 }
 
-function deduplicateByPath(entries: RawEntry[]): RawEntry[] {
-  const seen = new Map<string, RawEntry>();
+function aggregateByEndpoint(entries: RawEntry[]): AggregatedAuditRow[] {
+  const groups = new Map<string, AggregatedAuditRow>();
   for (const e of entries) {
     const key = `${e.method}::${endpointKey(e.originalUrl)}`;
-    if (!seen.has(key)) seen.set(key, e);
+    const row = groups.get(key);
+    if (!row) {
+      groups.set(key, {
+        ...e,
+        captureCount: 1,
+        captureIds: [e.id],
+      });
+    } else {
+      row.captureCount += 1;
+      row.captureIds.push(e.id);
+    }
   }
-  return [...seen.values()];
+  return [...groups.values()];
 }
 
 function isPassed(e: Pick<RawEntry, 'comparison'>): boolean {
@@ -217,11 +233,12 @@ function issueList(c: AuditComparison): string[] {
 }
 
 function renderHtml(
-  entries:       RawEntry[],
-  originalBase:  string,
-  newBase:       string,
-  auditPatterns: string[],
-  archiveDir:    string | null,
+  entries:         AggregatedAuditRow[],
+  totalCaptures:   number,
+  originalBase:    string,
+  newBase:         string,
+  auditPatterns:   string[],
+  archiveDir:      string | null,
 ): string {
   const passCount = entries.filter(isPassed).length;
   const failCount = entries.length - passCount;
@@ -234,8 +251,8 @@ function renderHtml(
        <div><strong>All APIs working correctly on the new system</strong><br>
        Every checked API returned the same structure as the old system.</div></div>`
     : `<div class="banner fail-banner"><span class="banner-icon">⚠</span>
-       <div><strong>${failCount} API${failCount > 1 ? 's need' : ' needs'} attention</strong><br>
-       ${passCount} out of ${entries.length} APIs passed.</div></div>`;
+       <div><strong>${failCount} unique endpoint${failCount > 1 ? 's need' : ' needs'} attention</strong><br>
+       ${passCount} out of ${entries.length} unique endpoints passed.</div></div>`;
 
   const archiveNote = archiveDir
     ? `<div class="archive-note">Previous run archived → <code>${archiveDir}</code></div>`
@@ -282,11 +299,15 @@ function renderHtml(
            <ul>${issues.map((i) => `<li>${i}</li>`).join('')}</ul></div>`
       : `<p class="ok-msg">✓ Structure and count look correct.</p>`;
 
+    const idsMeta = e.captureCount > 1
+      ? ` · capture IDs ${e.captureIds.join(', ')}`
+      : '';
+
     return `
     <div class="card ${passed ? 'card-pass' : 'card-fail'}">
       <div class="card-header">
         <div><div class="card-title">${label}</div>
-             <div class="card-meta">${e.method} · API #${e.id}</div></div>
+             <div class="card-meta">${e.method} · captured <strong>${e.captureCount}×</strong> · comparison uses #${e.id}${idsMeta}</div></div>
         <div class="badge ${passed ? 'badge-pass' : 'badge-fail'}">${passed ? '✓ PASS' : '✗ FAIL'}</div>
       </div>
       <div class="card-body">
@@ -358,13 +379,14 @@ footer{text-align:center;margin-top:32px;font-size:12px;color:#bbb}
 <body>
 <div class="wrap">
   <h1>📋 API Audit Report</h1>
-  <div class="sub">Generated on ${generated} · ${entries.length} APIs checked · ${pct}% passing</div>
+  <div class="sub">Generated on ${generated} · ${totalCaptures} HTTP capture${totalCaptures === 1 ? '' : 's'} · ${entries.length} unique endpoint${entries.length === 1 ? '' : 's'} · ${pct}% passing</div>
   ${archiveNote}
   ${overallBanner}
   <div class="stats">
-    <div class="stat"><div class="stat-num green">${passCount}</div><div class="stat-label">APIs Working ✓</div></div>
+    <div class="stat"><div class="stat-num green">${passCount}</div><div class="stat-label">Endpoints OK ✓</div></div>
     <div class="stat"><div class="stat-num red">${failCount}</div><div class="stat-label">Need Attention ⚠</div></div>
-    <div class="stat"><div class="stat-num">${entries.length}</div><div class="stat-label">Total Checked</div></div>
+    <div class="stat"><div class="stat-num">${entries.length}</div><div class="stat-label">Unique Endpoints</div></div>
+    <div class="stat"><div class="stat-num">${totalCaptures}</div><div class="stat-label">Total HTTP Captures</div></div>
     <div class="stat"><div class="stat-num">${pct}%</div><div class="stat-label">Pass Rate</div></div>
   </div>
   <div class="meta-box">
@@ -381,15 +403,25 @@ footer{text-align:center;margin-top:32px;font-size:12px;color:#bbb}
 
 // ─── calls log ────────────────────────────────────────────────────────────────
 
-function writeCallsLog(entries: RawEntry[], newBase: string, patterns: string[]): void {
+function writeCallsLog(
+  entries: AggregatedAuditRow[],
+  totalCaptures: number,
+  newBase: string,
+  patterns: string[],
+): void {
   const generated = new Date().toLocaleString();
   fs.writeFileSync(CALLS_JSON, JSON.stringify({
     generatedAt: new Date().toISOString(),
     newApiBase: newBase,
     auditedApis: patterns,
+    totalCaptures,
     uniqueEndpoints: entries.length,
     calls: entries.map((e) => ({
-      id: e.id, method: e.method,
+      id: e.id,
+      representativeId: e.id,
+      method: e.method,
+      captureCount: e.captureCount,
+      captureIds: e.captureIds,
       legacyUrl: e.originalUrl, newUrl: e.newUrl,
       legacyStatus: e.comparison.originalStatus,
       newStatus: e.comparison.newStatus,
@@ -403,13 +435,18 @@ function writeCallsLog(entries: RawEntry[], newBase: string, patterns: string[])
     '║                     API CALLS LOG — Legacy vs New                           ║',
     '╚══════════════════════════════════════════════════════════════════════════════╝',
     '', ` Generated   : ${generated}`, ` New server  : ${newBase}`,
-    ` APIs watched: ${patterns.join(', ')}`, ` Total calls : ${entries.length}`, '', div, '',
+    ` APIs watched: ${patterns.join(', ')}`,
+    ` Total HTTP captures : ${totalCaptures}`,
+    ` Unique endpoints    : ${entries.length}`, '', div, '',
   ];
 
   for (const e of entries) {
     const c      = e.comparison;
     const result = isPassed(e) ? '✓ PASS' : '✗ FAIL';
-    lines.push(` #${e.id} [${e.method}] ${result}`, '');
+    lines.push(
+      ` #${e.id} [${e.method}] ${result} · captured ${e.captureCount}× (IDs ${e.captureIds.join(', ')})`,
+      '',
+    );
     lines.push(`  LEGACY (${c.originalStatus ?? '—'}) ${e.originalUrl}`);
     lines.push(`  NEW    (${c.newStatus ?? '—'}) ${e.newUrl}`, '');
     if (c.originalCount !== null || c.newCount !== null) {
@@ -423,7 +460,10 @@ function writeCallsLog(entries: RawEntry[], newBase: string, patterns: string[])
     lines.push('', div, '');
   }
   const pc = entries.filter(isPassed).length;
-  lines.push(` SUMMARY: ${pc} PASS / ${entries.length - pc} FAIL / ${entries.length} TOTAL`, '');
+  lines.push(
+    ` SUMMARY: ${pc} PASS / ${entries.length - pc} FAIL · ${entries.length} unique endpoints · ${totalCaptures} total captures`,
+    '',
+  );
   fs.writeFileSync(CALLS_TXT, lines.join('\n'));
 }
 
@@ -578,33 +618,55 @@ async function run(): Promise<void> {
     process.exit(0);
   }
 
-  const deduped = deduplicateByPath(rawEntries);
+  const aggregated = aggregateByEndpoint(rawEntries);
+  const totalCaptures = rawEntries.length;
   console.log(chalk.gray(
-    `\n[audit] ${rawEntries.length} call(s) → ${deduped.length} unique endpoint(s) after deduplication`,
+    `\n[audit] ${totalCaptures} HTTP capture(s) → ${aggregated.length} unique endpoint(s) (comparison uses first capture per path)`,
   ));
 
   // ── archive previous run + save responses ──
-  const archiveDir = archivePreviousRun(deduped);
+  const archiveDir = archivePreviousRun(aggregated);
   if (archiveDir) {
     console.log(chalk.gray(`[audit] Previous run archived → ${archiveDir}`));
   }
 
   // ── write new reports ──
-  fs.writeFileSync(REPORT_JSON, JSON.stringify(rawEntries, null, 2));
-  fs.writeFileSync(REPORT_HTML, renderHtml(deduped, config.uiUrl, newBase, auditApis, archiveDir));
-  writeCallsLog(deduped, newBase, auditApis);
+  fs.writeFileSync(REPORT_JSON, JSON.stringify({
+    summary: {
+      generatedAt: new Date().toISOString(),
+      totalCaptures,
+      uniqueEndpoints: aggregated.length,
+      endpointRollup: aggregated.map((row) => ({
+        method: row.method,
+        path: endpointKey(row.originalUrl),
+        captureCount: row.captureCount,
+        captureIds: row.captureIds,
+        representativeCaptureId: row.id,
+      })),
+    },
+    captures: rawEntries,
+  }, null, 2));
+  fs.writeFileSync(
+    REPORT_HTML,
+    renderHtml(aggregated, totalCaptures, config.uiUrl, newBase, auditApis, archiveDir),
+  );
+  writeCallsLog(aggregated, totalCaptures, newBase, auditApis);
 
   // ── clean up session file — no leftover files after run ──
   if (fs.existsSync(STATE_FILE)) fs.unlinkSync(STATE_FILE);
 
-  const passCount = deduped.filter(isPassed).length;
+  const passCount = aggregated.filter(isPassed).length;
   console.log(`\n${chalk.green('[audit] ✅ Done!')}`);
   console.log(`  ${chalk.cyan('HTML report:')} ${REPORT_HTML}`);
   console.log(`  ${chalk.cyan('JSON report:')} ${REPORT_JSON}`);
   console.log(`  ${chalk.cyan('Calls log  :')} ${CALLS_TXT}`);
   if (archiveDir)
     console.log(`  ${chalk.cyan('Responses  :')} ${archiveDir}/responses/`);
-  console.log(`\n  ${chalk.green('Pass:')} ${passCount}  ${chalk.red('Fail:')} ${deduped.length - passCount}  Total: ${deduped.length}`);
+  console.log(
+    `\n  ${chalk.green('Pass:')} ${passCount}  ${chalk.red('Fail:')} ${aggregated.length - passCount}` +
+      `  ${chalk.gray('Unique endpoints:')} ${aggregated.length}` +
+      `  ${chalk.gray('Total captures:')} ${totalCaptures}`,
+  );
 }
 
 run().catch((err) => {
