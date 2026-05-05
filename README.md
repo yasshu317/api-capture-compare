@@ -78,7 +78,7 @@ TARGET_PATH=        # leave blank to navigate manually after login
 # New API server to test against
 NEW_API_BASE=https://your-new-api.example.com
 
-# Which APIs to capture (comma-separated path fragments)
+# Which APIs to capture (comma-separated substrings matched against the URL **path** only — not the query string)
 AUDIT_APIS=api/v1/patients,api/v1/offices,api/v1/tasks
 ```
 
@@ -125,7 +125,8 @@ npm run audit -- --apis "api/v1/payments,api/v1/employees"
 | File | Description | Kept in git? |
 |---|---|---|
 | `audit-report.html` | QA-friendly visual report — open in browser | No |
-| `audit-report.json` | Full raw data for all captured calls | No |
+| `audit-report.csv` | Spreadsheet summary (UTF-8 BOM): counts, matched watchlist fragments, URLs | No |
+| `audit-report.json` | `{ summary, captures[] }` — rollup counts + every captured call | No |
 | `api-calls-log.txt` | Human-readable log of legacy vs new URLs | No |
 | `api-calls-log.json` | Machine-readable calls log | No |
 | `audit-runs/<timestamp>/` | **Previous run archive** — auto-created each run | No |
@@ -139,6 +140,7 @@ Every time you run the audit, the **previous** output files are automatically mo
 audit-runs/
   2026-04-12_14-30-00/
     audit-report.html
+    audit-report.csv
     audit-report.json
     api-calls-log.txt
     api-calls-log.json
@@ -225,10 +227,10 @@ npm run audit -- --url "https://your-app.com/page?APP_KEY=abc123"
 ```
 
 **Will pagination calls create duplicate entries in the report?**  
-No. Calls to the same endpoint path (e.g. `/api/patients`) are deduplicated — only the first call per unique path appears in the report. All calls are still saved to `audit-report.json`.
+Same path + method is rolled into one **card** (legacy-vs-new comparison uses the **first** capture). The HTML report and logs show **how many times** that endpoint was captured, plus **total HTTP captures** for the session. `audit-report.json` lists every capture under `captures` and includes `summary.endpointRollup` with counts.
 
 **Where do I find previous run data?**  
 In `audit-runs/<timestamp>/` — a new folder is created each time you run the audit.
 
 **Are there any leftover files after a run?**  
-No. The only files written are the report files (`audit-report.html`, `api-calls-log.txt`, etc.) and the archived run in `audit-runs/`. No session file, no temp files.
+No. The only files written are the report files (`audit-report.html`, `audit-report.csv`, `api-calls-log.txt`, etc.) and the archived run in `audit-runs/`. No session file, no temp files.
