@@ -78,7 +78,7 @@ TARGET_PATH=        # leave blank to navigate manually after login
 # New API server to test against
 NEW_API_BASE=https://your-new-api.example.com
 
-# Which APIs to capture (comma-separated path fragments)
+# Which APIs to capture (comma-separated substrings matched against the URL **path** only — not the query string)
 AUDIT_APIS=api/v1/patients,api/v1/offices,api/v1/tasks
 ```
 
@@ -125,6 +125,7 @@ npm run audit -- --apis "api/v1/payments,api/v1/employees"
 | File | Description | Kept in git? |
 |---|---|---|
 | `audit-report.html` | QA-friendly visual report — open in browser | No |
+| `audit-report.csv` | Spreadsheet summary (UTF-8 BOM): counts, matched watchlist fragments, URLs | No |
 | `audit-report.json` | `{ summary, captures[] }` — rollup counts + every captured call | No |
 | `api-calls-log.txt` | Human-readable log of legacy vs new URLs | No |
 | `api-calls-log.json` | Machine-readable calls log | No |
@@ -139,6 +140,7 @@ Every time you run the audit, the **previous** output files are automatically mo
 audit-runs/
   2026-04-12_14-30-00/
     audit-report.html
+    audit-report.csv
     audit-report.json
     api-calls-log.txt
     api-calls-log.json
@@ -231,4 +233,4 @@ Same path + method is rolled into one **card** (legacy-vs-new comparison uses th
 In `audit-runs/<timestamp>/` — a new folder is created each time you run the audit.
 
 **Are there any leftover files after a run?**  
-No. The only files written are the report files (`audit-report.html`, `api-calls-log.txt`, etc.) and the archived run in `audit-runs/`. No session file, no temp files.
+No. The only files written are the report files (`audit-report.html`, `audit-report.csv`, `api-calls-log.txt`, etc.) and the archived run in `audit-runs/`. No session file, no temp files.

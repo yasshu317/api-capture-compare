@@ -29,6 +29,7 @@ const ROOT        = path.resolve(__dirname, '..');
 const STATE_FILE  = path.join(ROOT, 'browser-state.json');
 const REPORT_JSON = path.join(ROOT, 'audit-report.json');
 const REPORT_HTML = path.join(ROOT, 'audit-report.html');
+const REPORT_CSV  = path.join(ROOT, 'audit-report.csv');
 const CALLS_JSON  = path.join(ROOT, 'api-calls-log.json');
 const CALLS_TXT   = path.join(ROOT, 'api-calls-log.txt');
 const RUNS_DIR    = path.join(ROOT, 'audit-runs');
@@ -59,7 +60,7 @@ interface AggregatedAuditRow extends RawEntry {
  * Saves individual response JSON files into audit-runs/<timestamp>/responses/.
  */
 function archivePreviousRun(rawEntries: AggregatedAuditRow[]): string | null {
-  const outputFiles = [REPORT_HTML, REPORT_JSON, CALLS_JSON, CALLS_TXT];
+  const outputFiles = [REPORT_HTML, REPORT_JSON, REPORT_CSV, CALLS_JSON, CALLS_TXT];
   const hasExisting = outputFiles.some((f) => fs.existsSync(f));
   if (!hasExisting && rawEntries.length === 0) return null;
 
@@ -79,12 +80,11 @@ function archivePreviousRun(rawEntries: AggregatedAuditRow[]): string | null {
     }
   }
 
-  // Save individual response files for this run
+  // Save individual response files for this run (compact JSON — large payloads are common)
   for (const e of rawEntries) {
-    const safeName = `${String(e.id).padStart(3, '0')}_${e.method}_${
-      (() => { try { return new URL(e.originalUrl).pathname; } catch { return e.originalUrl; } })()
-        .replace(/\//g, '_').replace(/^_/, '').replace(/_$/, '') || 'response'
-    }.json`;
+    const safeName = responseArtifactFilename(e);
+    const legacyChars = serializedPayloadChars(e.originalBody);
+    const newChars    = serializedPayloadChars(e.newBody);
 
     fs.writeFileSync(
       path.join(respDir, safeName),
@@ -93,6 +93,7 @@ function archivePreviousRun(rawEntries: AggregatedAuditRow[]): string | null {
         method:      e.method,
         originalUrl: e.originalUrl,
         newUrl:      e.newUrl,
+        approxPayloadChars: { legacy: legacyChars, new: newChars },
         original: {
           status: e.comparison.originalStatus,
           body:   e.originalBody,
@@ -101,10 +102,10 @@ function archivePreviousRun(rawEntries: AggregatedAuditRow[]): string | null {
           status: e.comparison.newStatus,
           body:   e.newBody,
         },
-        result:      isPassed(e) ? 'PASS' : 'FAIL',
+        result:       isPassed(e) ? 'PASS' : 'FAIL',
         captureCount: e.captureCount,
         captureIds:   e.captureIds,
-      }, null, 2),
+      }),
     );
   }
 
@@ -120,8 +121,25 @@ function waitForEnter(prompt: string): Promise<void> {
   });
 }
 
+/** Match AUDIT_APIS against URL pathname only so query strings cannot trigger false positives (e.g. pattern `patients` matching plan_of_cares URLs whose query mentions `patients`). */
 function matchesAuditList(url: string, patterns: string[]): boolean {
-  return patterns.length > 0 && patterns.some((p) => url.includes(p));
+  if (patterns.length === 0) return false;
+  try {
+    const pathname = new URL(url).pathname;
+    return patterns.some((p) => pathname.includes(p));
+  } catch {
+    return patterns.some((p) => url.includes(p));
+  }
+}
+
+/** Path fragments from AUDIT_APIS that matched this URL path (for CSV / clarity). */
+function matchedAuditFragments(url: string, patterns: string[]): string[] {
+  try {
+    const pathname = new URL(url).pathname;
+    return patterns.filter((p) => pathname.includes(p));
+  } catch {
+    return patterns.filter((p) => url.includes(p));
+  }
 }
 
 function swapBase(url: string, originalOrigin: string, newBase: string): string {
@@ -181,6 +199,55 @@ function endpointKey(url: string): string {
   try { return new URL(url).pathname; } catch { return url; }
 }
 
+/** Serialized size for footprint lines (not byte-accurate for UTF-16 but stable enough for reports). */
+function serializedPayloadChars(body: unknown): number {
+  if (body === null || body === undefined) return 0;
+  if (typeof body === 'string') return body.length;
+  try {
+    return JSON.stringify(body).length;
+  } catch {
+    return String(body).length;
+  }
+}
+
+function formatPayloadFootprint(chars: number): string {
+  if (chars < 1024) return `${chars} chars`;
+  if (chars < 1024 * 1024) return `${(chars / 1024).toFixed(1)} KB`;
+  return `${(chars / (1024 * 1024)).toFixed(1)} MB`;
+}
+
+function urlPathAndQuery(url: string): { pathname: string; query: string } {
+  try {
+    const u = new URL(url);
+    const q = u.search ? u.search.slice(1) : '';
+    return { pathname: u.pathname || '/', query: q };
+  } catch {
+    return { pathname: url, query: '' };
+  }
+}
+
+/** True when every capture replays to the same absolute URL as was observed (usually misconfigured NEW_API_BASE). */
+function isReplaySameUrlAsCapture(entries: AggregatedAuditRow[]): boolean {
+  return entries.length > 0 && entries.every((e) => e.originalUrl === e.newUrl);
+}
+
+function responseArtifactFilename(e: Pick<AggregatedAuditRow, 'id' | 'method' | 'originalUrl'>): string {
+  const safePath =
+    (() => {
+      try { return new URL(e.originalUrl).pathname; } catch { return e.originalUrl; }
+    })()
+      .replace(/\//g, '_').replace(/^_/, '').replace(/_$/, '') || 'response';
+  return `${String(e.id).padStart(3, '0')}_${e.method}_${safePath}.json`;
+}
+
+function escapeHtml(text: string): string {
+  return text
+    .replace(/&/g, '&amp;')
+    .replace(/</g, '&lt;')
+    .replace(/>/g, '&gt;')
+    .replace(/"/g, '&quot;');
+}
+
 function aggregateByEndpoint(entries: RawEntry[]): AggregatedAuditRow[] {
   const groups = new Map<string, AggregatedAuditRow>();
   for (const e of entries) {
@@ -207,15 +274,32 @@ function isPassed(e: Pick<RawEntry, 'comparison'>): boolean {
 
 // ─── HTML report ──────────────────────────────────────────────────────────────
 
+function prettifyPathSegment(segment: string): string {
+  return segment.replace(/[-_]/g, ' ').replace(/\b\w/g, (c) => c.toUpperCase());
+}
+
+/**
+ * Card title from URL path: strips a leading `/api/v{N}` segment, then joins the rest
+ * so `…/patients/offline_dashboard` → "Patients · Offline Dashboard".
+ */
 function apiLabel(url: string): string {
   try {
     const parts = new URL(url).pathname.split('/').filter(Boolean);
-    const last  = parts[parts.length - 1] ?? url;
-    return last.replace(/[-_]/g, ' ').replace(/\b\w/g, (c) => c.toUpperCase());
-  } catch { return url; }
+    let tail = parts;
+    if (parts.length >= 2 && parts[0].toLowerCase() === 'api' && /^v\d+$/i.test(parts[1])) {
+      tail = parts.slice(2);
+    }
+    if (tail.length === 0) {
+      const fallback = parts[parts.length - 1];
+      return fallback ? prettifyPathSegment(fallback) : url;
+    }
+    return tail.map(prettifyPathSegment).join(' · ');
+  } catch {
+    return url;
+  }
 }
 
-function issueList(c: AuditComparison): string[] {
+function issueList(c: AuditComparison, omitKeyFieldBullets = false): string[] {
   const issues: string[] = [];
   if (!c.statusMatch)
     issues.push(`Status changed: old returned <strong>${c.originalStatus}</strong>, new returned <strong>${c.newStatus}</strong>`);
@@ -223,9 +307,9 @@ function issueList(c: AuditComparison): string[] {
     const basis = c.countBasis ? ` (counted via ${c.countBasis})` : '';
     issues.push(`Count mismatch${basis}: old = <strong>${c.originalCount}</strong>, new = <strong>${c.newCount}</strong>`);
   }
-  if (c.missingKeys.length)
+  if (!omitKeyFieldBullets && c.missingKeys.length)
     issues.push(`New system is <strong>missing</strong> fields: <code>${c.missingKeys.join(', ')}</code>`);
-  if (c.extraKeys.length)
+  if (!omitKeyFieldBullets && c.extraKeys.length)
     issues.push(`New system has <strong>extra</strong> fields: <code>${c.extraKeys.join(', ')}</code>`);
   if (c.error)
     issues.push(`Could not reach new system: <code>${c.error}</code>`);
@@ -240,162 +324,215 @@ function renderHtml(
   auditPatterns:   string[],
   archiveDir:      string | null,
 ): string {
-  const passCount = entries.filter(isPassed).length;
-  const failCount = entries.length - passCount;
-  const allPass   = failCount === 0;
-  const pct       = entries.length > 0 ? Math.round((passCount / entries.length) * 100) : 0;
-  const generated = new Date().toLocaleString();
+  const MAX_KEY_CHIPS = 28;
+  const passCount     = entries.filter(isPassed).length;
+  const failCount     = entries.length - passCount;
+  const allPass       = failCount === 0;
+  const pct           = entries.length > 0 ? Math.round((passCount / entries.length) * 100) : 0;
+  const generated     = new Date().toLocaleString();
+  const sameReplay    = isReplaySameUrlAsCapture(entries);
+  const archiveFolderName = archiveDir ? path.basename(archiveDir) : '';
+  const archiveShort      = archiveDir ? path.relative(ROOT, archiveDir) : '';
 
-  const overallBanner = allPass
-    ? `<div class="banner pass-banner"><span class="banner-icon">✓</span>
-       <div><strong>All APIs working correctly on the new system</strong><br>
-       Every checked API returned the same structure as the old system.</div></div>`
-    : `<div class="banner fail-banner"><span class="banner-icon">⚠</span>
-       <div><strong>${failCount} unique endpoint${failCount > 1 ? 's need' : ' needs'} attention</strong><br>
-       ${passCount} out of ${entries.length} unique endpoints passed.</div></div>`;
+  const headlineBanner = allPass
+    ? `<div class="banner pass-banner"><span class="banner-icon">✓</span><div><strong>All endpoints passed</strong><span class="banner-sub">Structure and counts align between captured responses and replay.</span></div></div>`
+    : `<div class="banner fail-banner"><span class="banner-icon">!</span><div><strong>${failCount} endpoint${failCount === 1 ? '' : 's'} failed</strong><span class="banner-sub">${passCount} of ${entries.length} unique paths passed (${pct}% pass rate).</span></div></div>`;
 
   const archiveNote = archiveDir
-    ? `<div class="archive-note">Previous run archived → <code>${archiveDir}</code></div>`
+    ? `<p class="run-archive-hint">Previous outputs archived under <code>${escapeHtml(archiveShort)}</code></p>`
     : '';
 
   const cards = entries.map((e) => {
     const c      = e.comparison;
     const passed = isPassed(e);
-    const issues = issueList(c);
-    const label  = apiLabel(e.originalUrl);
+    const issues = issueList(c, !c.keysMatch);
+    const label  = escapeHtml(apiLabel(e.originalUrl));
+    const frags  = matchedAuditFragments(e.originalUrl, auditPatterns);
+    const fragLine = frags.length
+      ? `<div class="matched-frags">Matched ${frags.map((f) => `<span class="frag-chip">${escapeHtml(f)}</span>`).join(' ')}</div>`
+      : '';
 
     const countBadge = c.countMatch === false
-      ? `<span class="badge badge-warn">▲ Count differs</span>`
-      : c.countMatch === true ? `<span class="badge badge-ok">✓ Match</span>` : '';
+      ? `<span class="badge badge-warn">Count Δ</span>`
+      : c.countMatch === true ? `<span class="badge badge-ok">Count ✓</span>` : '';
 
     const basisNote = c.countBasis
-      ? `<div class="count-basis">Counted via: ${c.countBasis}</div>` : '';
+      ? `<p class="count-basis">Compared via ${escapeHtml(c.countBasis)}</p>` : '';
 
     const recordLine = (c.originalCount !== null || c.newCount !== null)
       ? `<div class="record-row">
-           <div class="record-box"><div class="record-label">Old</div><div class="record-num">${c.originalCount ?? '—'}</div></div>
+           <div class="record-box"><div class="record-label">Old rows</div><div class="record-num">${c.originalCount ?? '—'}</div></div>
            <div class="record-arrow">→</div>
-           <div class="record-box"><div class="record-label">New</div><div class="record-num">${c.newCount ?? '—'}</div></div>
+           <div class="record-box"><div class="record-label">New rows</div><div class="record-num">${c.newCount ?? '—'}</div></div>
            ${countBadge}
          </div>${basisNote}`
-      : `<p class="dim">No count available</p>`;
+      : `<p class="dim subtle">No row count inferred</p>`;
 
-    const keySection = (lbl: string, keys: string[], cls: string) =>
-      keys.length === 0 ? '' :
-      `<div class="key-group">
-         <div class="key-group-label ${cls}">${lbl} (${keys.length})</div>
-         <div class="key-chips">${keys.map((k) => `<span class="chip ${cls}">${k}</span>`).join('')}</div>
-       </div>`;
+    const mkChips = (keys: string[], cls: string) => {
+      const slice = keys.slice(0, MAX_KEY_CHIPS);
+      const more  = keys.length - slice.length;
+      const chips = slice.map((k) => `<span class="chip ${cls}">${escapeHtml(k)}</span>`).join('');
+      const moreLbl = more > 0 ? `<span class="chip-more">+${more} more</span>` : '';
+      return chips + moreLbl;
+    };
 
     const keyBlock = !c.keysMatch
       ? `<div class="key-diff">
-           ${keySection('Missing in new system', c.missingKeys, 'missing')}
-           ${keySection('Extra in new system',   c.extraKeys,   'extra')}
+           ${c.missingKeys.length ? `<div class="key-group"><span class="key-group-label missing">Missing in new (${c.missingKeys.length})</span><div class="key-chips">${mkChips(c.missingKeys, 'missing')}</div></div>` : ''}
+           ${c.extraKeys.length ? `<div class="key-group"><span class="key-group-label extra">Extra in new (${c.extraKeys.length})</span><div class="key-chips">${mkChips(c.extraKeys, 'extra')}</div></div>` : ''}
          </div>`
-      : `<p class="dim key-ok">✓ All nested keys match</p>`;
-
-    const issueBlock = issues.length
-      ? `<div class="issues"><div class="issues-title">What needs attention:</div>
-           <ul>${issues.map((i) => `<li>${i}</li>`).join('')}</ul></div>`
-      : `<p class="ok-msg">✓ Structure and count look correct.</p>`;
-
-    const idsMeta = e.captureCount > 1
-      ? ` · capture IDs ${e.captureIds.join(', ')}`
       : '';
 
+    const issueBlock = issues.length
+      ? `<div class="issues"><p class="issues-title">Needs attention</p><ul>${issues.map((i) => `<li>${i}</li>`).join('')}</ul></div>`
+      : '';
+
+    const idsSuffix = e.captureCount > 1
+      ? ` · IDs ${e.captureIds.join(', ')}`
+      : '';
+
+    const { pathname: pathOnly, query: queryOnly } = urlPathAndQuery(e.originalUrl);
+    const pathInner = `<span class="url-label">Path</span> <code>${escapeHtml(pathOnly)}</code>${
+      queryOnly ? ` <span class="url-label">· Query</span> <code class="query">${escapeHtml(queryOnly)}</code>` : ''
+    }`;
+
+    const legChars = serializedPayloadChars(e.originalBody);
+    const nwChars  = serializedPayloadChars(e.newBody);
+
+    const artifactName = responseArtifactFilename(e);
+    const dumpHint = archiveFolderName
+      ? `<span class="dump-ref">${escapeHtml(`responses/${artifactName}`)}</span>`
+      : '';
+
+    const techInner = `
+        <p class="path-line">${pathInner}</p>
+        <p class="payload-line">Payload ≈ Old ${formatPayloadFootprint(legChars)} · New ${formatPayloadFootprint(nwChars)}${dumpHint ? ` · ${dumpHint}` : ''}</p>
+        <div class="url-pair">
+          <div><span class="url-label">Captured</span> <span class="mono">${escapeHtml(e.originalUrl)}</span></div>
+          <div><span class="url-label">Replay</span> <span class="mono">${escapeHtml(e.newUrl)}</span></div>
+        </div>`;
+
+    const summaryOk =
+      passed && issues.length === 0 && c.keysMatch
+        ? '<p class="ok-inline">✓ Keys and inferred counts match.</p>'
+        : '';
+
     return `
-    <div class="card ${passed ? 'card-pass' : 'card-fail'}">
-      <div class="card-header">
-        <div><div class="card-title">${label}</div>
-             <div class="card-meta">${e.method} · captured <strong>${e.captureCount}×</strong> · comparison uses #${e.id}${idsMeta}</div></div>
-        <div class="badge ${passed ? 'badge-pass' : 'badge-fail'}">${passed ? '✓ PASS' : '✗ FAIL'}</div>
-      </div>
+    <article class="card ${passed ? 'card-pass' : 'card-fail'}">
+      <header class="card-header">
+        <div class="card-head-main">
+          <h2 class="card-title">${label}</h2>
+          <p class="card-meta"><strong>${escapeHtml(e.method)}</strong> · ${e.captureCount} capture${e.captureCount === 1 ? '' : 's'} · sample #${e.id}${idsSuffix}</p>
+          ${fragLine}
+        </div>
+        <span class="badge ${passed ? 'badge-pass' : 'badge-fail'}">${passed ? 'PASS' : 'FAIL'}</span>
+      </header>
       <div class="card-body">
         ${recordLine}
         ${issueBlock}
         ${keyBlock}
-        <div class="url-block">
-          <div><span class="url-label">Old:</span> <span class="url-text">${e.originalUrl}</span></div>
-          <div><span class="url-label">New:</span> <span class="url-text">${e.newUrl}</span></div>
-        </div>
+        ${summaryOk}
+        <details class="tech-details">
+          <summary>URLs &amp; payload details</summary>
+          <div class="tech-details-body">${techInner}</div>
+        </details>
       </div>
-    </div>`;
-  }).join('');
+    </article>`;
+  }).join('\n');
 
   return `<!DOCTYPE html>
 <html lang="en">
 <head>
 <meta charset="UTF-8"><meta name="viewport" content="width=device-width,initial-scale=1">
-<title>API Audit Report</title>
+<title>API audit report</title>
 <style>
 *{box-sizing:border-box;margin:0;padding:0}
-body{font-family:-apple-system,BlinkMacSystemFont,'Segoe UI',Roboto,sans-serif;background:#f0f2f5;color:#222;padding:32px 16px}
-.wrap{max-width:960px;margin:0 auto}
-h1{font-size:24px;color:#1a237e;margin-bottom:4px}
-.sub{color:#888;font-size:13px;margin-bottom:16px}
-.archive-note{background:#f5f5f5;border-radius:6px;padding:8px 14px;font-size:12px;color:#999;margin-bottom:20px}
-.archive-note code{font-size:11px;color:#777}
-.banner{display:flex;align-items:flex-start;gap:16px;padding:20px 24px;border-radius:10px;margin-bottom:24px;font-size:15px}
-.banner-icon{font-size:28px;line-height:1}
-.pass-banner{background:#e8f5e9;border-left:5px solid #43a047}
-.fail-banner{background:#fff3e0;border-left:5px solid #fb8c00}
-.stats{display:flex;gap:12px;flex-wrap:wrap;margin-bottom:24px}
-.stat{background:#fff;border-radius:10px;padding:16px 20px;flex:1;min-width:110px;text-align:center;box-shadow:0 1px 4px rgba(0,0,0,.08)}
-.stat-num{font-size:32px;font-weight:700;color:#1a237e}
-.stat-num.green{color:#43a047}.stat-num.red{color:#e53935}
-.stat-label{font-size:12px;color:#888;margin-top:4px}
-.meta-box{background:#fff;border-radius:10px;padding:14px 20px;margin-bottom:24px;font-size:13px;color:#555;box-shadow:0 1px 4px rgba(0,0,0,.08)}
-.card{background:#fff;border-radius:10px;margin-bottom:16px;box-shadow:0 1px 4px rgba(0,0,0,.08);overflow:hidden}
-.card-pass{border-left:5px solid #43a047}.card-fail{border-left:5px solid #e53935}
-.card-header{display:flex;justify-content:space-between;align-items:flex-start;padding:16px 20px;border-bottom:1px solid #f0f0f0}
-.card-title{font-size:16px;font-weight:600;color:#1a237e}
-.card-meta{font-size:12px;color:#888;margin-top:4px}
-.card-body{padding:16px 20px;display:flex;flex-direction:column;gap:12px}
-.badge{display:inline-block;padding:4px 12px;border-radius:20px;font-size:13px;font-weight:600;white-space:nowrap}
-.badge-pass{background:#e8f5e9;color:#2e7d32}.badge-fail{background:#ffebee;color:#c62828}
-.badge-ok{background:#e8f5e9;color:#2e7d32;font-size:12px}.badge-warn{background:#fff3e0;color:#e65100;font-size:12px}
-.record-row{display:flex;align-items:center;gap:12px;flex-wrap:wrap}
-.record-box{background:#f5f5f5;border-radius:8px;padding:10px 16px;text-align:center;min-width:80px}
-.record-label{font-size:11px;color:#888}.record-num{font-size:24px;font-weight:700;color:#1a237e}
-.record-arrow{font-size:20px;color:#aaa}
-.count-basis{font-size:11px;color:#aaa;margin-top:4px;font-style:italic}
-.issues{background:#fff8e1;border-radius:8px;padding:14px 16px}
-.issues-title{font-weight:600;font-size:13px;color:#e65100;margin-bottom:8px}
-.issues ul{padding-left:18px}.issues li{font-size:14px;line-height:1.8;color:#444}
-.ok-msg{color:#2e7d32;font-size:14px}
-.key-diff{display:flex;flex-direction:column;gap:10px}
-.key-group-label{font-size:12px;font-weight:700;margin-bottom:6px;padding:3px 8px;border-radius:4px;display:inline-block}
-.missing{background:#ffebee;color:#c62828}.extra{background:#e3f2fd;color:#1565c0}
-.key-chips{display:flex;flex-wrap:wrap;gap:6px}
-.chip{font-size:11px;padding:3px 8px;border-radius:4px;font-family:monospace}
-.chip.missing{background:#ffebee;color:#c62828}.chip.extra{background:#e3f2fd;color:#1565c0}
-.key-ok{color:#2e7d32;font-size:13px}
-.url-block{font-size:12px;color:#888;border-top:1px solid #f0f0f0;padding-top:10px;word-break:break-all}
-.url-block div{margin-bottom:3px}.url-label{font-weight:600;color:#aaa}.url-text{color:#999}
-.dim{color:#aaa;font-size:13px}
-footer{text-align:center;margin-top:32px;font-size:12px;color:#bbb}
+body{font-family:-apple-system,BlinkMacSystemFont,'Segoe UI',Roboto,sans-serif;background:#eceff4;color:#1e293b;line-height:1.45;padding:28px 16px 48px}
+.wrap{max-width:920px;margin:0 auto}
+h1{font-size:22px;font-weight:650;color:#0f172a;letter-spacing:-0.02em}
+.run-archive-hint{font-size:12px;color:#64748b;margin:10px 0 6px}
+.run-archive-hint code{font-size:11px;background:#fff;padding:2px 6px;border-radius:4px;color:#475569}
+.sub{color:#64748b;font-size:13px;margin-top:6px}
+.banner{display:flex;gap:14px;padding:16px 18px;border-radius:12px;margin:18px 0;font-size:14px;align-items:flex-start}
+.banner-icon{font-size:22px;line-height:1.25;font-weight:700}
+.banner strong{display:block;font-size:15px;margin-bottom:2px}
+.banner-sub{display:block;opacity:.9;font-size:13px;font-weight:400;margin-top:2px}
+.pass-banner{background:#ecfdf5;border:1px solid #a7f3d0;color:#065f46}
+.fail-banner{background:#fffbeb;border:1px solid #fcd34d;color:#92400e}
+.stats{display:grid;grid-template-columns:repeat(4,minmax(0,1fr));gap:10px;margin:18px 0}
+.stat{background:#fff;border-radius:10px;padding:14px 12px;text-align:center;border:1px solid #e2e8f0}
+.stat-num{font-size:26px;font-weight:700;color:#0f172a}
+.stat-num.ok{color:#059669}.stat-num.bad{color:#dc2626}
+.stat-label{font-size:11px;color:#64748b;text-transform:uppercase;letter-spacing:.04em;margin-top:4px}
+.config-strip{background:#fff;border:1px solid #e2e8f0;border-radius:12px;padding:14px 18px;margin-bottom:22px;font-size:13px;color:#475569;display:grid;gap:8px}
+.config-strip dl{display:grid;grid-template-columns:140px 1fr;gap:6px 14px;align-items:start}
+.config-strip dt{color:#94a3b8;font-weight:600;font-size:12px;text-transform:uppercase;letter-spacing:.03em}
+.config-strip dd{word-break:break-all}
+.warn-chip{display:inline-block;margin-top:8px;background:#fef3c7;color:#92400e;font-size:12px;padding:6px 10px;border-radius:8px;border:1px solid #fcd34d}
+.card{background:#fff;border:1px solid #e2e8f0;border-radius:12px;margin-bottom:14px;overflow:hidden}
+.card-pass{border-left:4px solid #10b981}.card-fail{border-left:4px solid #ef4444}
+.card-header{display:flex;justify-content:space-between;gap:16px;padding:14px 18px;border-bottom:1px solid #f1f5f9;align-items:flex-start}
+.card-title{font-size:16px;font-weight:650;color:#0f172a}
+.card-meta{font-size:12px;color:#64748b;margin-top:4px}
+.card-meta strong{color:#334155}
+.matched-frags{margin-top:8px;font-size:11px;color:#64748b}
+.frag-chip{display:inline-block;background:#f1f5f9;color:#475569;padding:2px 7px;border-radius:999px;margin-right:4px;margin-bottom:3px;font-family:ui-monospace SFMono-Regular Menlo Monaco Consolas monospace;font-size:10px}
+.card-body{padding:14px 18px 16px;display:flex;flex-direction:column;gap:12px}
+.badge{padding:5px 12px;border-radius:999px;font-size:11px;font-weight:700;letter-spacing:.03em;flex-shrink:0}
+.badge-pass{background:#d1fae5;color:#047857}.badge-fail{background:#fee2e2;color:#b91c1c}
+.badge-ok{background:#ecfdf5;color:#065f46;font-size:11px}.badge-warn{background:#fffbeb;color:#b45309;font-size:11px}
+.record-row{display:flex;align-items:center;gap:10px;flex-wrap:wrap}
+.record-box{background:#f8fafc;border-radius:8px;padding:8px 14px;text-align:center;min-width:72px;border:1px solid #e2e8f0}
+.record-label{font-size:10px;color:#94a3b8;text-transform:uppercase;letter-spacing:.05em}.record-num{font-size:20px;font-weight:700;color:#0f172a}
+.record-arrow{color:#cbd5e1;font-size:18px}
+.count-basis{font-size:11px;color:#94a3b8;margin-top:4px}
+.subtle{font-size:12px}
+.issues{background:#fffbeb;border:1px solid #fcd34d;border-radius:10px;padding:12px 14px}
+.issues-title{font-weight:650;font-size:12px;color:#b45309;margin-bottom:8px;text-transform:uppercase;letter-spacing:.03em}
+.issues ul{padding-left:18px}.issues li{font-size:13px;color:#444;margin-bottom:4px}
+.ok-inline{font-size:13px;color:#047857;font-weight:500}
+.key-diff{display:flex;flex-direction:column;gap:12px}
+.key-group{display:flex;flex-direction:column;gap:6px}
+.key-group-label{font-size:11px;font-weight:700;padding:3px 8px;border-radius:6px;display:inline-block;width:fit-content}
+.key-chips{display:flex;flex-wrap:wrap;gap:5px}
+.chip{font-size:10px;padding:3px 7px;border-radius:5px;font-family:ui-monospace SFMono-Regular Menlo Monaco Consolas monospace}
+.chip.missing{background:#fef2f2;color:#991b1b}.chip.extra{background:#eff6ff;color:#1d4ed8}
+.chip-more{font-size:10px;color:#94a3b8;padding:3px 6px}
+.tech-details{font-size:12px;border:1px dashed #cbd5e1;border-radius:10px;padding:0;background:#fafafa}
+.tech-details summary{cursor:pointer;padding:10px 14px;font-weight:600;color:#475569;list-style-position:outside;margin-left:14px}
+.tech-details-body{padding:0 14px 14px;display:flex;flex-direction:column;gap:8px;color:#64748b}
+.path-line code,.payload-line,.mono{font-family:ui-monospace SFMono-Regular Menlo Monaco Consolas monospace;font-size:11px;background:#fff;padding:2px 5px;border-radius:4px;border:1px solid #e2e8f0;word-break:break-all}
+.url-label{font-weight:600;color:#94a3b8;margin-right:4px;font-size:11px;text-transform:uppercase;letter-spacing:.04em}
+.query{font-size:10px}
+.url-pair{display:flex;flex-direction:column;gap:6px;margin-top:4px}
+.dump-ref{font-family:ui-monospace SFMono-Regular Menlo Monaco Consolas monospace;font-size:10px;color:#64748b}
+.dim{color:#94a3b8}
+footer{text-align:center;margin-top:28px;font-size:11px;color:#cbd5e1}
+@media(max-width:640px){.stats{grid-template-columns:repeat(2,minmax(0,1fr))}.config-strip dl{grid-template-columns:1fr}}
 </style>
 </head>
 <body>
 <div class="wrap">
-  <h1>📋 API Audit Report</h1>
-  <div class="sub">Generated on ${generated} · ${totalCaptures} HTTP capture${totalCaptures === 1 ? '' : 's'} · ${entries.length} unique endpoint${entries.length === 1 ? '' : 's'} · ${pct}% passing</div>
+  <h1>API audit report</h1>
+  <p class="sub">${escapeHtml(generated)} · ${totalCaptures} capture${totalCaptures === 1 ? '' : 's'} across ${entries.length} unique path${entries.length === 1 ? '' : 's'} · ${pct}% pass rate</p>
   ${archiveNote}
-  ${overallBanner}
+  ${headlineBanner}
   <div class="stats">
-    <div class="stat"><div class="stat-num green">${passCount}</div><div class="stat-label">Endpoints OK ✓</div></div>
-    <div class="stat"><div class="stat-num red">${failCount}</div><div class="stat-label">Need Attention ⚠</div></div>
-    <div class="stat"><div class="stat-num">${entries.length}</div><div class="stat-label">Unique Endpoints</div></div>
-    <div class="stat"><div class="stat-num">${totalCaptures}</div><div class="stat-label">Total HTTP Captures</div></div>
-    <div class="stat"><div class="stat-num">${pct}%</div><div class="stat-label">Pass Rate</div></div>
+    <div class="stat"><div class="stat-num ok">${passCount}</div><div class="stat-label">Passed</div></div>
+    <div class="stat"><div class="stat-num bad">${failCount}</div><div class="stat-label">Failed</div></div>
+    <div class="stat"><div class="stat-num">${entries.length}</div><div class="stat-label">Unique paths</div></div>
+    <div class="stat"><div class="stat-num">${totalCaptures}</div><div class="stat-label">Total captures</div></div>
   </div>
-  <div class="meta-box">
-    <strong>Old system:</strong> ${originalBase} &nbsp;·&nbsp;
-    <strong>New system:</strong> ${newBase} &nbsp;·&nbsp;
-    <strong>APIs watched:</strong> ${auditPatterns.join(', ')}
-  </div>
+  <section class="config-strip">
+    <dl>
+      <dt>Captured UI</dt><dd>${escapeHtml(originalBase)}</dd>
+      <dt>Replay base</dt><dd>${escapeHtml(newBase)}</dd>
+      <dt>Watchlist</dt><dd>${escapeHtml(auditPatterns.join(', '))}</dd>
+    </dl>
+    ${sameReplay ? '<p class="warn-chip">Replay URLs match captures — set <code>NEW_API_BASE</code> to another host to compare environments.</p>' : ''}
+  </section>
   <div id="results">${cards}</div>
-  <footer>Report generated automatically · ${generated}</footer>
+  <footer>Generated automatically</footer>
 </div>
 </body>
 </html>`;
@@ -422,9 +559,14 @@ function writeCallsLog(
       method: e.method,
       captureCount: e.captureCount,
       captureIds: e.captureIds,
+      matchedFragments: matchedAuditFragments(e.originalUrl, patterns),
       legacyUrl: e.originalUrl, newUrl: e.newUrl,
       legacyStatus: e.comparison.originalStatus,
       newStatus: e.comparison.newStatus,
+      approxPayloadChars: {
+        legacy: serializedPayloadChars(e.originalBody),
+        new: serializedPayloadChars(e.newBody),
+      },
       result: isPassed(e) ? 'PASS' : 'FAIL',
     })),
   }, null, 2));
@@ -465,6 +607,70 @@ function writeCallsLog(
     '',
   );
   fs.writeFileSync(CALLS_TXT, lines.join('\n'));
+}
+
+function csvCell(val: string | number | null | undefined): string {
+  const s = val === null || val === undefined ? '' : String(val);
+  if (/[",\n\r]/.test(s)) return `"${s.replace(/"/g, '""')}"`;
+  return s;
+}
+
+/** Spreadsheet-friendly summary (open in Excel / Sheets). UTF-8 BOM for Excel. */
+function writeAuditCsv(
+  entries: AggregatedAuditRow[],
+  newBase: string,
+  patterns: string[],
+): void {
+  const watchlist = patterns.join('; ');
+  const header = [
+    'Result',
+    'Title',
+    'Method',
+    'Path',
+    'MatchedFragments',
+    'WatchlistPatterns',
+    'CaptureCount',
+    'CaptureIds',
+    'RepresentativeId',
+    'LegacyStatus',
+    'NewStatus',
+    'OldRowCount',
+    'NewRowCount',
+    'CountBasis',
+    'ApproxLegacyChars',
+    'ApproxNewChars',
+    'LegacyUrl',
+    'NewUrl',
+  ];
+  const lines = [
+    header.join(','),
+    ...entries.map((e) => {
+      const c      = e.comparison;
+      const pathname = endpointKey(e.originalUrl);
+      const frags  = matchedAuditFragments(e.originalUrl, patterns);
+      return [
+        csvCell(isPassed(e) ? 'PASS' : 'FAIL'),
+        csvCell(apiLabel(e.originalUrl)),
+        csvCell(e.method),
+        csvCell(pathname),
+        csvCell(frags.join('; ')),
+        csvCell(watchlist),
+        csvCell(e.captureCount),
+        csvCell(e.captureIds.join(' ')),
+        csvCell(e.id),
+        csvCell(c.originalStatus ?? ''),
+        csvCell(c.newStatus ?? ''),
+        csvCell(c.originalCount ?? ''),
+        csvCell(c.newCount ?? ''),
+        csvCell(c.countBasis ?? ''),
+        csvCell(serializedPayloadChars(e.originalBody)),
+        csvCell(serializedPayloadChars(e.newBody)),
+        csvCell(e.originalUrl),
+        csvCell(e.newUrl),
+      ].join(',');
+    }),
+  ];
+  fs.writeFileSync(REPORT_CSV, `\uFEFF${lines.join('\n')}\n`);
 }
 
 // ─── main ─────────────────────────────────────────────────────────────────────
@@ -651,6 +857,7 @@ async function run(): Promise<void> {
     renderHtml(aggregated, totalCaptures, config.uiUrl, newBase, auditApis, archiveDir),
   );
   writeCallsLog(aggregated, totalCaptures, newBase, auditApis);
+  writeAuditCsv(aggregated, newBase, auditApis);
 
   // ── clean up session file — no leftover files after run ──
   if (fs.existsSync(STATE_FILE)) fs.unlinkSync(STATE_FILE);
@@ -660,6 +867,7 @@ async function run(): Promise<void> {
   console.log(`  ${chalk.cyan('HTML report:')} ${REPORT_HTML}`);
   console.log(`  ${chalk.cyan('JSON report:')} ${REPORT_JSON}`);
   console.log(`  ${chalk.cyan('Calls log  :')} ${CALLS_TXT}`);
+  console.log(`  ${chalk.cyan('CSV summary:')} ${REPORT_CSV}`);
   if (archiveDir)
     console.log(`  ${chalk.cyan('Responses  :')} ${archiveDir}/responses/`);
   console.log(

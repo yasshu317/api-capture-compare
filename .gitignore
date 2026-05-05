@@ -3,6 +3,7 @@ dist/
 .env
 audit-report.json
 audit-report.html
+audit-report.csv
 api-calls-log.json
 api-calls-log.txt
 audit-runs/
